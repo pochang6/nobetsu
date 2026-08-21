@@ -1,42 +1,43 @@
 import AppKit
 import SwiftUI
-import ApplicationServices
 
-/// アクセシビリティ許可の案内。
+/// 権限の案内。
 ///
-/// macOS の許可ダイアログは「アプリごとに一度きり」しか出ない。
-/// 見逃すと、二度と何も出ないまま無反応なアプリが残る。
+/// macOS の許可ダイアログはアプリごとに一度きりしか出ない。見逃すと二度と案内されない。
 /// しかも許可が無い状態では ⌘ の長押しを検知できないので、
-/// 「使おうとした瞬間に案内する」ことが原理的にできない。
+/// 「使おうとした瞬間に案内する」ことが原理的にできない。だから起動時に出す。
 ///
-/// だから起動時に、閉じるまで残るウィンドウで案内する。
-/// 許可されたかどうかは自分で見張り、付いたら自動で有効化する。ユーザーに再起動させない。
+/// 判定は AXIsProcessTrusted() に頼らない。あれは起動中のプロセスで結果がキャッシュされ、
+/// 許可しても false のままになることがある。実際にイベントタップを作れるかどうかで判断する。
 @MainActor
 final class PermissionCoach {
 
-    /// 許可を検知したときに呼ばれる。戻り値 false ならプロセスを入れ替える必要がある
-    var onGranted: (() -> Bool)?
+    /// タップを作れたときに呼ばれる。戻り値 false なら有効化に失敗している
+    var onReady: (() -> Bool)?
 
     private var window: NSWindow?
     private var pollTimer: Timer?
     private var waitingSince: Date?
     private let model = CoachModel()
 
-    var isTrusted: Bool { AXIsProcessTrusted() }
-
     // MARK: - 表示
 
-    /// 許可が無いときだけ案内を出す。戻り値は「すでに許可済みか」
+    /// 許可が揃っていなければ案内を出す。戻り値は「もう使える状態か」
     @discardableResult
     func presentIfNeeded() -> Bool {
-        if isTrusted { return true }
+        if Permissions.canCreateEventTap() { return true }
+
+        // 一覧に載らないと、そもそもユーザーがオンにできない。
+        // どちらも純正ダイアログは出さず、案内はこのウィンドウ1枚に集約する
+        Permissions.registerForAccessibility()
+
         present()
         return false
     }
 
     func present() {
         if window == nil { build() }
-        model.granted = isTrusted
+        refreshStatus()
         model.message = ""
         model.showTroubleshooting = false
         waitingSince = Date()
@@ -50,7 +51,9 @@ final class PermissionCoach {
     private func build() {
         let view = CoachView(
             model: model,
-            openSettings: { [weak self] in self?.openAccessibilitySettings() },
+            openAccessibility: { Permissions.openAccessibilitySettings() },
+            openInputMonitoring: { Permissions.openInputMonitoringSettings() },
+            relaunch: { Permissions.relaunch() },
             recheck: { [weak self] in self?.recheck() },
             dismiss: { [weak self] in self?.close() })
 
@@ -61,7 +64,7 @@ final class PermissionCoach {
         w.titlebarAppearsTransparent = true
         w.isReleasedWhenClosed = false
         w.level = .floating
-        w.setContentSize(NSSize(width: 560, height: 560))
+        w.setContentSize(NSSize(width: 580, height: 620))
         window = w
     }
 
@@ -71,7 +74,7 @@ final class PermissionCoach {
         window?.orderOut(nil)
     }
 
-    // MARK: - 許可の見張り
+    // MARK: - 見張り
 
     private func startPolling() {
         pollTimer?.invalidate()
@@ -81,80 +84,61 @@ final class PermissionCoach {
     }
 
     private func tick() {
-        // しばらく待っても変わらないなら、たいてい署名が変わったせいで
-        // 「一覧はオンなのに拒否される」状態になっている。その対処を画面に出す
-        if let since = waitingSince, Date().timeIntervalSince(since) > 6, !model.granted {
+        refreshStatus()
+
+        if let since = waitingSince, Date().timeIntervalSince(since) > 5, !model.ready {
             model.showTroubleshooting = true
         }
-        checkNow()
-    }
 
-    /// ボタンから手動で確認する
-    func recheck() {
-        model.message = isTrusted ? "" : "まだ許可が確認できません。"
-        model.showTroubleshooting = true
-        checkNow()
-    }
-
-    private func checkNow() {
-        guard isTrusted else { return }
+        guard model.tapWorks else { return }
 
         pollTimer?.invalidate()
         pollTimer = nil
-        model.granted = true
 
-        // 許可が付いた直後は、同じプロセスのままでも有効化できることが多い。
-        // できなければプロセスを入れ替える。どちらにせよユーザーは何もしなくていい
-        let activated = onGranted?() ?? false
-        if activated {
+        if onReady?() == true {
+            model.ready = true
             model.message = "設定が完了しました。⌘ を長押しすると話しはじめられます。"
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
                 self?.close()
             }
         } else {
-            model.message = "設定を反映しています。まもなく使えるようになります…"
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                PermissionCoach.relaunch()
-            }
+            model.message = "有効にできませんでした。nobetsu を再起動してください。"
+            model.showTroubleshooting = true
+            startPolling()
         }
     }
 
-    /// 自分を起動し直して、古いプロセスを畳む
-    static func relaunch() {
-        let url = Bundle.main.bundleURL
-        let config = NSWorkspace.OpenConfiguration()
-        config.createsNewApplicationInstance = true
-        NSWorkspace.shared.openApplication(at: url, configuration: config) { _, _ in
-            DispatchQueue.main.async { NSApp.terminate(nil) }
+    func recheck() {
+        refreshStatus()
+        model.showTroubleshooting = true
+        if !model.tapWorks {
+            model.message = "まだ許可が反映されていません。下の「nobetsu を再起動する」をお試しください。"
         }
+        tick()
     }
 
-    // MARK: - 設定画面を開く
-
-    /// macOS 26 では旧来の com.apple.preference.security 系の URL が
-    /// 「アクセシビリティ機能」(VoiceOver やズーム) の画面に飛んでしまい、
-    /// 権限一覧にたどり着けない。新しい PrivacySecurity.extension を先に試す。
-    func openAccessibilitySettings() {
-        let candidates = [
-            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility",
-            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
-        ]
-        for string in candidates {
-            if let url = URL(string: string), NSWorkspace.shared.open(url) { return }
-        }
+    private func refreshStatus() {
+        model.accessibility = Permissions.accessibilityGranted
+        model.inputMonitoring = Permissions.inputMonitoringGranted
+        model.tapWorks = Permissions.canCreateEventTap()
     }
 }
 
 @MainActor
 final class CoachModel: ObservableObject {
-    @Published var granted = false
+    @Published var accessibility = false
+    @Published var inputMonitoring = false
+    @Published var tapWorks = false
+    @Published var ready = false
     @Published var message = ""
     @Published var showTroubleshooting = false
 }
 
 private struct CoachView: View {
     @ObservedObject var model: CoachModel
-    let openSettings: () -> Void
+    let openAccessibility: () -> Void
+    let openInputMonitoring: () -> Void
+    let relaunch: () -> Void
     let recheck: () -> Void
     let dismiss: () -> Void
 
@@ -162,29 +146,29 @@ private struct CoachView: View {
         VStack(alignment: .leading, spacing: 16) {
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("アクセシビリティの許可をお願いします")
+                Text("使いはじめるまえに、2つの許可をお願いします")
                     .font(.system(size: 20, weight: .semibold))
-                Text("nobetsu は、話した内容をそのとき使っているアプリへ直接入力します。\nmacOS ではこの動作に「アクセシビリティ」の許可が必要です。")
+                Text("nobetsu は ⌘ の長押しを待ち受け、話した内容をそのとき使っているアプリへ直接入力します。\nmacOS では、この2つの動作にそれぞれ許可が必要です。")
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            VStack(alignment: .leading, spacing: 10) {
-                step(1, "「アクセシビリティ設定を開く」を押してください",
-                     "「プライバシーとセキュリティ」の中のアクセシビリティが開きます")
-                step(2, "一覧から nobetsu を探して、オンにしてください",
-                     "一覧に見当たらない場合は、左下の + から nobetsu.app を追加してください")
-                step(3, "オンにしたら、この画面に戻ってきてください",
-                     "許可を確認しだい自動で有効になり、この画面は閉じます")
-            }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
+            permissionRow(
+                granted: model.accessibility,
+                title: "アクセシビリティ",
+                detail: "認識した文字を、今使っているアプリへ入力するために使います",
+                action: openAccessibility)
+
+            permissionRow(
+                granted: model.inputMonitoring,
+                title: "入力監視",
+                detail: "⌘ の長押しを待ち受けるために使います",
+                action: openInputMonitoring)
 
             statusRow
 
-            if model.showTroubleshooting && !model.granted {
+            if model.showTroubleshooting && !model.ready {
                 troubleshooting
             }
 
@@ -192,51 +176,84 @@ private struct CoachView: View {
 
             HStack(spacing: 10) {
                 Button("閉じる") { dismiss() }
-                Text("メニューバーの ⚠︎ からいつでも開き直せます")
-                    .font(.system(size: 11))
+                Text("メニューバーの ⚠︎ から\nいつでも開き直せます")
+                    .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
                 Spacer()
                 Button("もう一度確認する") { recheck() }
-                    .disabled(model.granted)
-                Button(action: openSettings) {
-                    Text("アクセシビリティ設定を開く").frame(minWidth: 170)
+                    .disabled(model.ready)
+                Button(action: relaunch) {
+                    Text("nobetsu を再起動する").frame(minWidth: 150)
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(model.granted)
+                .disabled(model.ready)
             }
         }
         .padding(24)
-        .frame(width: 560, height: 560)
+        .frame(width: 580, height: 620)
+    }
+
+    private func permissionRow(
+        granted: Bool,
+        title: String,
+        detail: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            Image(systemName: granted ? "checkmark.circle.fill" : "circle")
+                .font(.system(size: 18))
+                .foregroundStyle(granted ? Color.green : Color.secondary)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 14, weight: .medium))
+                Text(detail)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 8)
+
+            Button(granted ? "確認する" : "設定を開く", action: action)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            (granted ? Color.green.opacity(0.10) : Color.primary.opacity(0.045)),
+            in: RoundedRectangle(cornerRadius: 10))
     }
 
     private var statusRow: some View {
         HStack(spacing: 8) {
-            Image(systemName: model.granted ? "checkmark.circle.fill" : "circle.dotted")
-                .foregroundStyle(model.granted ? Color.green : Color.secondary)
+            Image(systemName: model.tapWorks ? "checkmark.seal.fill" : "circle.dotted")
+                .foregroundStyle(model.tapWorks ? Color.green : Color.secondary)
             Text(statusText)
                 .font(.system(size: 12))
-                .foregroundStyle(model.granted ? .primary : .secondary)
+                .foregroundStyle(model.tapWorks ? .primary : .secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     private var statusText: String {
-        if model.granted {
-            return model.message.isEmpty ? "許可を確認しました" : model.message
-        }
-        return model.message.isEmpty ? "許可を確認しています…" : model.message
+        if !model.message.isEmpty { return model.message }
+        if model.tapWorks { return "準備ができました" }
+        return "許可を確認しています…"
     }
 
-    /// 「一覧ではオンになっているのに有効にならない」ときの対処。
-    /// 開発中のビルドは署名が毎回変わるため、macOS が別のアプリとして扱って拒否する
     private var troubleshooting: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label("すでにオンになっているのに、この画面が変わらない場合", systemImage: "lightbulb")
+            Label("上の2つをオンにしても変わらない場合", systemImage: "lightbulb")
                 .font(.system(size: 12, weight: .medium))
             Text("""
-                 一覧の nobetsu を、一度オフにしてから、もう一度オンにしてください。それで解決します。
+                 「nobetsu を再起動する」を押してください。それで反映されます。
 
+                 macOS は権限の判定をアプリの起動時に読み込むため、
+                 起動したままの nobetsu には、あとから与えた許可が届きません。
+
+                 なお、一覧に nobetsu があってオンに見えるのに効かない場合は、
+                 一度オフにしてからオンにし直してください。
                  アプリを更新すると macOS からは別のアプリに見えることがあり、
-                 表示はオンのままでも、実際には許可されていない状態になります。
+                 表示はオンのままでも許可されていない状態になります。
                  開発中のビルドで起きる現象で、配布版では起きません。
                  """)
                 .font(.system(size: 11))
@@ -246,23 +263,5 @@ private struct CoachView: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
-    }
-
-    private func step(_ number: Int, _ title: String, _ detail: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Text("\(number)")
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(.white)
-                .frame(width: 20, height: 20)
-                .background(Color.accentColor, in: Circle())
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: 13, weight: .medium))
-                Text(detail)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-        }
     }
 }

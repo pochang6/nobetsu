@@ -43,17 +43,13 @@ final class Controller: ObservableObject {
         trigger.onStop = { [weak self] in self?.stop() }
         trigger.rightCommandOnly = rightCommandOnly
 
-        coach.onGranted = { [weak self] in self?.activateTrigger() ?? false }
-
-        // 一度これを呼んでおかないと、システム設定の一覧に nobetsu が現れない。
-        // 許可ダイアログ自体はアプリごとに一度きりしか出ないので、これには頼らない
-        injector.requestAccessibilityIfNeeded()
+        coach.onReady = { [weak self] in self?.activateTrigger() ?? false }
 
         if coach.presentIfNeeded() {
             activateTrigger()
         } else {
             needsPermission = true
-            status = "アクセシビリティの許可待ち"
+            status = "許可の設定が必要です"
         }
     }
 
@@ -62,7 +58,7 @@ final class Controller: ObservableObject {
     private func activateTrigger() -> Bool {
         guard trigger.start() else {
             needsPermission = true
-            status = "アクセシビリティの許可待ち"
+            status = "許可の設定が必要です"
             return false
         }
         needsPermission = false

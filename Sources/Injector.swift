@@ -153,13 +153,4 @@ final class TextInjector {
         }
     }
 
-    // MARK: - 権限
-
-    /// アクセシビリティ権限を要求する。CGEvent の送出にはこれが必須
-    @discardableResult
-    func requestAccessibilityIfNeeded() -> Bool {
-        if AXIsProcessTrusted() { return true }
-        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as NSString
-        return AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
-    }
 }
