@@ -61,4 +61,17 @@ else
   codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1
 fi
 
-echo "==> built: $(pwd)/$APP"
+# システム設定の一覧（アクセシビリティ / 入力監視）は、+ を押すと
+# 「アプリケーション」フォルダを開く。リポジトリの中に置いたままだと
+# ユーザーはそこから nobetsu を選べない。だから決まった場所に置く。
+# パスが固定されることで、許可の登録も安定する。
+INSTALLED="/Applications/$APP_NAME.app"
+echo "==> installing to $INSTALLED"
+pkill -f "$APP_NAME.app/Contents/MacOS/$APP_NAME" 2>/dev/null || true
+rm -rf "$INSTALLED"
+ditto "$APP" "$INSTALLED"
+
+echo "==> built:     $(pwd)/$APP"
+echo "==> installed: $INSTALLED"
+echo
+echo "起動するには: open \"$INSTALLED\""
