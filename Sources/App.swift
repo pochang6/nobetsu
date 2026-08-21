@@ -8,6 +8,8 @@ final class Controller: ObservableObject {
 
     @Published private(set) var isRunning = false
     @Published private(set) var status = "待機中"
+    /// 許可が足りていない。メニューバーのアイコンに警告を出すために持つ
+    @Published private(set) var needsPermission = true
 
     @Published var useFarField = true {
         didSet { engine.useFarField = useFarField }
@@ -24,6 +26,7 @@ final class Controller: ObservableObject {
     private let injector = TextInjector()
     private let overlay = OverlayController()
     private let trigger = TriggerMonitor()
+    private let coach = PermissionCoach()
 
     /// この収録で確定した分。表示窓のためだけに持つ
     private var committed = ""
@@ -40,23 +43,36 @@ final class Controller: ObservableObject {
         trigger.onStop = { [weak self] in self?.stop() }
         trigger.rightCommandOnly = rightCommandOnly
 
-        // キーの見張りにも、文字の打ち込みにもアクセシビリティ権限が要る。
-        // 無いまま起動すると ⌘ を長押ししても無反応で、原因が分からないまま終わる
-        guard injector.requestAccessibilityIfNeeded(), trigger.start() else {
+        coach.onGranted = { [weak self] in self?.activateTrigger() ?? false }
+
+        // 一度これを呼んでおかないと、システム設定の一覧に nobetsu が現れない。
+        // 許可ダイアログ自体はアプリごとに一度きりしか出ないので、これには頼らない
+        injector.requestAccessibilityIfNeeded()
+
+        if coach.presentIfNeeded() {
+            activateTrigger()
+        } else {
+            needsPermission = true
             status = "アクセシビリティの許可待ち"
-            presentAccessibilityNotice()
-            return
         }
-        status = "待機中（⌘ 長押しで開始）"
     }
 
-    /// 権限を与えたあとに呼び直すための入口
-    func retryBootstrap() {
+    /// キーの見張りを起動する。許可が無ければ失敗する
+    @discardableResult
+    private func activateTrigger() -> Bool {
         guard trigger.start() else {
-            presentAccessibilityNotice()
-            return
+            needsPermission = true
+            status = "アクセシビリティの許可待ち"
+            return false
         }
+        needsPermission = false
         status = "待機中（⌘ 長押しで開始）"
+        return true
+    }
+
+    /// メニューから案内をもう一度開く
+    func showPermissionCoach() {
+        coach.present()
     }
 
     // MARK: - 開始と停止
@@ -74,27 +90,6 @@ final class Controller: ObservableObject {
         guard isRunning else { return }
         engine.stop()
         injector.reset()
-    }
-
-    private func presentAccessibilityNotice() {
-        let alert = NSAlert()
-        alert.messageText = "アクセシビリティの許可が必要です"
-        alert.informativeText = """
-        nobetsu は ⌘ の長押しを見張り、認識した文字を今使っているアプリへ直接打ち込みます。
-        そのために「システム設定 > プライバシーとセキュリティ > アクセシビリティ」で
-        nobetsu を許可してください。
-
-        許可したら、メニューバーの波形アイコンから「権限を確認して再開」を選んでください。
-        """
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "システム設定を開く")
-        alert.addButton(withTitle: "あとで")
-
-        NSApp.activate(ignoringOtherApps: true)
-        if alert.runModal() == .alertFirstButtonReturn {
-            let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
-            NSWorkspace.shared.open(url)
-        }
     }
 }
 
@@ -149,17 +144,22 @@ struct NobetsuApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            Button(controller.isRunning ? "停止" : "話しはじめる") {
-                controller.toggle()
+            if controller.needsPermission {
+                Button("⚠︎ アクセシビリティを許可する") {
+                    controller.showPermissionCoach()
+                }
+                Text("許可するまで ⌘ の長押しに反応しません")
+                Divider()
+            } else {
+                Button(controller.isRunning ? "停止" : "話しはじめる") {
+                    controller.toggle()
+                }
+                Text(controller.status)
+                Divider()
+                Text("⌘ を長押しで開始")
+                Text("もう一度 ⌘、または ESC で停止")
+                Divider()
             }
-            Text(controller.status)
-
-            Divider()
-
-            Text("⌘ を長押しで開始")
-            Text("もう一度 ⌘、または ESC で停止")
-
-            Divider()
 
             Toggle("右の ⌘ だけで開始する", isOn: $controller.rightCommandOnly)
             Toggle("遠距離マイク補正", isOn: $controller.useFarField)
@@ -168,10 +168,14 @@ struct NobetsuApp: App {
 
             Divider()
 
-            Button("権限を確認して再開") { controller.retryBootstrap() }
             Button("nobetsu を終了") { NSApp.terminate(nil) }
         } label: {
-            Image(systemName: controller.isRunning ? "waveform.circle.fill" : "waveform")
+            Image(systemName: iconName)
         }
+    }
+
+    private var iconName: String {
+        if controller.needsPermission { return "exclamationmark.triangle.fill" }
+        return controller.isRunning ? "waveform.circle.fill" : "waveform"
     }
 }
