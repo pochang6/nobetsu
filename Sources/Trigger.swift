@@ -98,8 +98,11 @@ final class TriggerMonitor {
         event: CGEvent
     ) -> Unmanaged<CGEvent>? {
 
-        // タップが重い処理で無効化されたら戻す
+        // タップが重い処理で無効化されたら戻す。
+        // コールバックの中で時間を使うと macOS がタップを切るので、
+        // ここに来るということは、どこかで待たせている
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            Log.write("⚠️ イベントタップが無効化された (\(type == .tapDisabledByTimeout ? "timeout" : "userInput")) → 再有効化する")
             if let monitor = current, let port = MainActor.assumeIsolated({ monitor.tap }) {
                 CGEvent.tapEnable(tap: port, enable: true)
             }
@@ -144,9 +147,11 @@ final class TriggerMonitor {
             return false
 
         case .keyDown:
-            // 認識中の ESC は飲み込んで停止に使う
+            // 認識中の ESC は飲み込んで停止に使う。
+            // 呼び出しはコールバックの外へ逃がす。ここで待たせるとタップが切られる
             if isRunning && keyCode == TriggerMonitor.keyEscape {
-                onStop?()
+                Log.write("ESC → 停止")
+                fireStop()
                 return true
             }
             // ⌘ を押している最中に他のキーが来た＝ショートカット。長押し判定を取り下げる
@@ -183,7 +188,8 @@ final class TriggerMonitor {
                 self.holdTimer = nil
                 guard self.commandDownAt != nil, !self.holdInvalidated, !self.isRunning else { return }
                 self.holdConsumed = true
-                self.onStart?()
+                Log.write("⌘ 長押しを検知 → 開始")
+                self.fireStart()
             }
         }
     }
@@ -208,8 +214,20 @@ final class TriggerMonitor {
         // ⌘V などショートカットの一部だった場合は無効化されているので止まらない
         let held = Date().timeIntervalSince(heldSince)
         if isRunning && !wasInvalidated && held < holdThreshold {
-            onStop?()
+            Log.write("⌘ の単独タップ → 停止")
+            fireStop()
         }
+    }
+
+    /// イベントタップのコールバックを塞がないよう、必ず次のループへ逃がす。
+    /// ここで OS のダイアログを出したり音声エンジンを起こしたりすると、
+    /// macOS がタップを無効化して、以後キーが一切効かなくなる
+    private func fireStart() {
+        DispatchQueue.main.async { [weak self] in self?.onStart?() }
+    }
+
+    private func fireStop() {
+        DispatchQueue.main.async { [weak self] in self?.onStop?() }
     }
 
     private func invalidateHold() {

@@ -42,19 +42,38 @@ enum Permissions {
 
     // MARK: - 入力監視
 
+    /// イベントタップ用の許可判定は CoreGraphics 側の API を使う。
+    /// IOHIDCheckAccess / IOHIDRequestAccess は HID デバイス向けで、用途が違う。
     static var inputMonitoringGranted: Bool {
-        IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+        CGPreflightListenEventAccess()
+    }
+
+    /// 記録用。IOHID 側の見え方も併記しておくと切り分けが早い
+    static var inputMonitoringStatusText: String {
+        let cg = CGPreflightListenEventAccess() ? "granted" : "not granted"
+        let hid: String
+        switch IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) {
+        case kIOHIDAccessTypeGranted: hid = "granted"
+        case kIOHIDAccessTypeDenied:  hid = "denied"
+        case kIOHIDAccessTypeUnknown: hid = "unknown"
+        default:                      hid = "other"
+        }
+        return "CG=\(cg) HID=\(hid)"
     }
 
     /// 純正の許可ダイアログを出す。
     ///
-    /// アクセシビリティ側と同じく、これが一覧への登録と設定画面への近道を兼ねる。
-    /// さらに許可したあとは macOS 自身が「終了して再度開く」を提案してくれるので、
-    /// 再起動の面倒まで OS が引き受けてくれる。自前で用意するより確実で分かりやすい。
+    /// CGRequestListenEventAccess がイベントタップ用の正しい入口。
+    ///
+    /// 注意が2つある。
+    /// 一つ目、**AXIsProcessTrusted() を先に呼ぶとこの要求が通らなくなる**という
+    /// 既知の不具合がある。だからアクセシビリティには触れる前にこれを呼ぶ。
+    /// 二つ目、アドホック署名のアプリは安定した Designated Requirement を持たないため、
+    /// TCC がユーザーに尋ねることなく denied にする。署名の固定が前提条件になる。
     @discardableResult
     static func promptForInputMonitoring() -> Bool {
-        if inputMonitoringGranted { return true }
-        return IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+        if CGPreflightListenEventAccess() { return true }
+        return CGRequestListenEventAccess()
     }
 
     // MARK: - 実力判定
@@ -75,6 +94,27 @@ enum Permissions {
         }
         CGEvent.tapEnable(tap: probe, enable: false)
         return true
+    }
+
+    /// 記録用。アドホック署名かどうかが分かれば、TCC の即時 denied を切り分けられる
+    static var signingSummary: String {
+        var code: SecCode?
+        guard SecCodeCopySelf(SecCSFlags(), &code) == errSecSuccess, let code else {
+            return "取得できず"
+        }
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(
+            code as! SecStaticCode,
+            SecCSFlags(rawValue: kSecCSSigningInformation),
+            &info) == errSecSuccess,
+            let dict = info as? [String: Any]
+        else {
+            return "取得できず"
+        }
+        let identifier = dict["identifier"] as? String ?? "?"
+        let flags = dict["flags"] as? UInt32 ?? 0
+        let isAdhoc = (flags & 0x0000_0002) != 0  // kSecCodeSignatureAdhoc
+        return "\(identifier) \(isAdhoc ? "adhoc(TCC に嫌われる)" : "安定した署名")"
     }
 
     // MARK: - 設定画面

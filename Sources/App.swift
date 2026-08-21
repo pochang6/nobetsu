@@ -14,8 +14,24 @@ final class Controller: ObservableObject {
     @Published var useFarField = true {
         didSet { engine.useFarField = useFarField }
     }
-    @Published var showsOverlay = true {
-        didSet { if !showsOverlay { overlay.hide() } else if isRunning { overlay.show() } }
+    /// 認識中の文字を画面に流す。見た目は楽しいが入力先の文章と重なるので既定は切る
+    @Published var showsTranscript = false {
+        didSet {
+            Defaults.showsTranscript = showsTranscript
+            if !showsTranscript { overlay.hide() } else if isRunning { overlay.show() }
+        }
+    }
+    @Published var showsIndicator = true {
+        didSet {
+            Defaults.showsIndicator = showsIndicator
+            if !showsIndicator { indicator.hide() } else if isRunning { indicator.show() }
+        }
+    }
+    @Published var soundEnabled = true {
+        didSet { Sounds.enabled = soundEnabled }
+    }
+    @Published var launchAtLogin = false {
+        didSet { LoginItem.setEnabled(launchAtLogin) }
     }
     /// ⌘ の誤発火が気になるとき用の逃げ道。右⌘ だけを開始キーにする
     @Published var rightCommandOnly = false {
@@ -25,6 +41,7 @@ final class Controller: ObservableObject {
     private let engine = DictationEngine()
     private let injector = TextInjector()
     private let overlay = OverlayController()
+    private let indicator = IndicatorController()
     private let trigger = TriggerMonitor()
 
     private var permissionPoll: Timer?
@@ -34,12 +51,27 @@ final class Controller: ObservableObject {
 
     private init() {
         engine.delegate = self
+        showsTranscript = Defaults.showsTranscript
+        showsIndicator = Defaults.showsIndicator
+        soundEnabled = Sounds.enabled
         engine.useFarField = useFarField
+        engine.levelHandler = { [weak self] level in
+            self?.indicator.update(level: level)
+        }
+        indicator.onClick = { [weak self] in self?.stop() }
     }
 
     // MARK: - 起動
 
     func bootstrap() {
+        Log.startSession()
+        // アクセシビリティの判定より先に入力監視を扱う。
+        // AXIsProcessTrusted() を先に呼ぶと入力監視の要求が通らなくなる既知の不具合がある
+        Log.write("bootstrap: 入力監視 \(Permissions.inputMonitoringStatusText) / 署名 \(Permissions.signingSummary)")
+
+        LoginItem.applyDefaultOnFirstLaunch()
+        launchAtLogin = LoginItem.isEnabled
+
         trigger.onStart = { [weak self] in self?.start() }
         trigger.onStop = { [weak self] in self?.stop() }
         trigger.rightCommandOnly = rightCommandOnly
@@ -52,10 +84,14 @@ final class Controller: ObservableObject {
     @discardableResult
     private func activateTrigger() -> Bool {
         guard trigger.start() else {
+            if !needsPermission {
+                Log.write("trigger: イベントタップを作れない（入力監視=\(Permissions.inputMonitoringGranted)）")
+            }
             needsPermission = true
             status = "許可が必要です"
             return false
         }
+        Log.write("trigger: 見張りを開始した")
         needsPermission = false
         status = "待機中（⌘ 長押しで開始）"
         permissionPoll?.invalidate()
@@ -65,22 +101,34 @@ final class Controller: ObservableObject {
 
     /// 入力監視の許可を求める。
     ///
-    /// 自前の案内ウィンドウは作らない。トリガーの起動を試みること自体が
-    /// macOS 標準の許可ダイアログを呼ぶので、それに乗る。
+    /// 許可ダイアログを出すのは CGRequestListenEventAccess であって、
+    /// CGEventTap の生成ではない。tapCreate は許可が無ければ黙って nil を返すだけ。
     ///
     /// 2つの許可を並べて聞かない。必要になる瞬間が違うからだ。
     /// 入力監視は ⌘ の長押しを待ち受けるために起動した時点で要る。
     /// アクセシビリティは文字を打ち込むときに要るので、初めて喋ろうとしたときに聞く。
-    /// こうすると同時に2つ出ることがなく、それぞれ必要な理由も伝わる。
     func requestPermissions() {
-        activateTrigger()
+        if activateTrigger() { return }
+
+        if !Permissions.inputMonitoringGranted {
+            // TCC のダイアログは、要求元が前面にいないと出ないことがある
+            NSApp.activate(ignoringOtherApps: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                Log.write("入力監視: 要求前 \(Permissions.inputMonitoringStatusText)")
+                let result = Permissions.promptForInputMonitoring()
+                Log.write("入力監視: CGRequestListenEventAccess=\(result) 要求後 \(Permissions.inputMonitoringStatusText)")
+            }
+        }
         startPermissionPoll()
     }
 
     private func startPermissionPoll() {
         permissionPoll?.invalidate()
         permissionPoll = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.activateTrigger() }
+            Task { @MainActor in
+                guard Permissions.inputMonitoringGranted else { return }
+                self?.activateTrigger()
+            }
         }
     }
 
@@ -95,7 +143,9 @@ final class Controller: ObservableObject {
         // 認識はできているのに何も入らない、という一番わけの分からない状態になる。
         // 「使おうとした瞬間」である今、OS の許可ダイアログを出す
         guard Permissions.accessibilityGranted else {
+            Log.write("start: アクセシビリティ未許可のため中断し、許可を求める")
             status = "文字を入力する許可が必要です"
+            Sounds.playFailure()
             Permissions.promptForAccessibility()
             return
         }
@@ -118,7 +168,7 @@ extension Controller: DictationDelegate {
 
     func dictation(didUpdateVolatile text: String) {
         injector.updateVolatile(text)
-        if showsOverlay {
+        if showsTranscript {
             overlay.update(committed: committed, volatile: text, status: status)
         }
     }
@@ -126,26 +176,48 @@ extension Controller: DictationDelegate {
     func dictation(didFinalize text: String) {
         injector.finalize(text)
         committed += text
-        if showsOverlay {
+        if showsTranscript {
             overlay.update(committed: committed, volatile: "", status: status)
         }
     }
 
     func dictation(didChangeRunning running: Bool, message: String) {
+        let wasRunning = isRunning
         isRunning = running
         status = message
         trigger.isRunning = running
 
         if running {
-            if showsOverlay { overlay.show() }
+            if !wasRunning { Sounds.playStart() }
+            if showsIndicator { indicator.show() }
+            if showsTranscript { overlay.show() }
         } else {
-            overlay.update(committed: committed, volatile: "", status: message)
-            // すぐ消すと最後の一言を読めないまま消える
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-                guard let self, !self.isRunning else { return }
-                self.overlay.hide()
+            if wasRunning { Sounds.playStop() }
+            indicator.hide()
+            if showsTranscript {
+                overlay.update(committed: committed, volatile: "", status: message)
+                // すぐ消すと最後の一言を読めないまま消える
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+                    guard let self, !self.isRunning else { return }
+                    self.overlay.hide()
+                }
             }
         }
+    }
+}
+
+/// 設定の保存先。数が少ないので UserDefaults で足りる
+enum Defaults {
+    static var showsTranscript: Bool {
+        get { UserDefaults.standard.bool(forKey: "nobetsu.showsTranscript") }
+        set { UserDefaults.standard.set(newValue, forKey: "nobetsu.showsTranscript") }
+    }
+    static var showsIndicator: Bool {
+        get {
+            if UserDefaults.standard.object(forKey: "nobetsu.showsIndicator") == nil { return true }
+            return UserDefaults.standard.bool(forKey: "nobetsu.showsIndicator")
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "nobetsu.showsIndicator") }
     }
 }
 
@@ -181,10 +253,13 @@ struct NobetsuApp: App {
                 Divider()
             }
 
+            Toggle("ログイン時に起動", isOn: $controller.launchAtLogin)
+            Toggle("開始と終了を音で知らせる", isOn: $controller.soundEnabled)
+            Toggle("左上に認識中の目印を出す", isOn: $controller.showsIndicator)
+            Toggle("認識中の文字を画面に流す", isOn: $controller.showsTranscript)
             Toggle("右の ⌘ だけで開始する", isOn: $controller.rightCommandOnly)
             Toggle("遠距離マイク補正", isOn: $controller.useFarField)
                 .disabled(controller.isRunning)
-            Toggle("認識中の文字を画面に表示", isOn: $controller.showsOverlay)
 
             Divider()
 

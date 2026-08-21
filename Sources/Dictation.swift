@@ -24,11 +24,18 @@ final class DictationEngine {
     weak var delegate: DictationDelegate?
     private(set) var isRunning = false
 
+    /// 入力レベル（0〜1 目安）。声が届いているかを目印に出すために使う
+    var levelHandler: ((Float) -> Void)?
+
     /// 遠距離集音のヒント。spike では入力レベルが 0.027〜0.052 と低く、
     /// 本人も「60センチ離れている」と話していたため既定で有効にする。
     var useFarField = true
 
-    private let audioEngine = AVAudioEngine()
+    /// 使うときだけ作って、終わったら捨てる。
+    /// 停止しただけでは入力ノードがマイクを掴んだままになり、
+    /// macOS 標準の音声入力が起動直後に切れる（マイクの奪い合いになる）。
+    /// インスタンスごと解放することで、確実に手放す
+    private var audioEngine: AVAudioEngine?
     private var analyzer: SpeechAnalyzer?
     private var transcriber: DictationTranscriber?
     private var continuation: AsyncStream<AnalyzerInput>.Continuation?
@@ -46,11 +53,13 @@ final class DictationEngine {
     private func startAsync() async {
         notify(false, "マイクを確認中…")
 
+        Log.write("mic: 現在の状態 = \(AVCaptureDevice.authorizationStatus(for: .audio).rawValue)")
         guard await requestMicrophone() else {
             notify(false, "マイクの権限がありません")
             return
         }
-        _ = await requestSpeechRecognition()
+        let speechOK = await requestSpeechRecognition()
+        Log.write("speech: 認可 = \(speechOK)")
 
         var hints: Set<DictationTranscriber.ContentHint> = []
         if useFarField { hints.insert(.farField) }
@@ -136,7 +145,10 @@ final class DictationEngine {
     // MARK: - オーディオ
 
     private func startAudio(to analyzerFormat: AVAudioFormat) throws {
-        let input = audioEngine.inputNode
+        let engine = AVAudioEngine()
+        audioEngine = engine
+
+        let input = engine.inputNode
         let inputFormat = input.outputFormat(forBus: 0)
 
         guard inputFormat.sampleRate > 0 else {
@@ -149,13 +161,45 @@ final class DictationEngine {
         }
 
         let cont = continuation
+        let onLevel = levelHandler
         input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { buffer, _ in
+            if let onLevel {
+                let level = DictationEngine.rms(of: buffer)
+                DispatchQueue.main.async { onLevel(level) }
+            }
             if let converted = DictationEngine.convert(buffer, to: analyzerFormat, using: converter) {
                 cont?.yield(AnalyzerInput(buffer: converted))
             }
         }
-        audioEngine.prepare()
-        try audioEngine.start()
+        engine.prepare()
+        try engine.start()
+    }
+
+    /// マイクを完全に手放す。
+    /// tap を外す → 停止 → reset → インスタンスを捨てる、まで揃えないと、
+    /// macOS 標準の音声入力が「起動してすぐ切れる」状態になる
+    private func releaseAudio() {
+        guard let engine = audioEngine else { return }
+        if engine.isRunning {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+        } else {
+            engine.inputNode.removeTap(onBus: 0)
+        }
+        engine.reset()
+        audioEngine = nil
+        Log.write("audio: マイクを解放した")
+    }
+
+    private nonisolated static func rms(of buffer: AVAudioPCMBuffer) -> Float {
+        guard let data = buffer.floatChannelData, buffer.frameLength > 0 else { return 0 }
+        var sum: Float = 0
+        let count = Int(buffer.frameLength)
+        for i in 0..<count {
+            let v = data[0][i]
+            sum += v * v
+        }
+        return (sum / Float(count)).squareRoot()
     }
 
     private nonisolated static func convert(
@@ -192,10 +236,9 @@ final class DictationEngine {
     private func stopAsync() async {
         isRunning = false
 
-        if audioEngine.isRunning {
-            audioEngine.inputNode.removeTap(onBus: 0)
-            audioEngine.stop()
-        }
+        // 何よりも先にマイクを返す。ここが遅れると他アプリの音声入力が壊れる
+        releaseAudio()
+
         continuation?.finish()
         continuation = nil
 
@@ -227,6 +270,7 @@ final class DictationEngine {
     }
 
     private func notify(_ running: Bool, _ message: String) {
+        Log.write("engine: running=\(running) \(message)")
         delegate?.dictation(didChangeRunning: running, message: message)
     }
 }

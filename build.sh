@@ -47,17 +47,22 @@ swiftc \
   Sources/*.swift \
   -o "$APP/Contents/MacOS/$APP_NAME"
 
-# アクセシビリティ権限は署名の同一性に紐づく。アドホック署名だとビルドのたびに
-# 署名が変わり、そのつど許可し直しになる。開発用の自己署名証明書があればそれを使う。
+# macOS の許可（アクセシビリティ / 入力監視）は、署名の同一性に紐づいて記録される。
+# アドホック署名にはその同一性が無いため、ビルドのたびに別アプリ扱いになり、
+# 入力監視にいたっては尋ねられることすらなく拒否されることがある。
+#
+# 自己署名の証明書を1つ作れば同一性が固定され、この問題がまるごと消える。
 #
 #   作り方: キーチェーンアクセス > 証明書アシスタント > 自分に証明書を作成
-#           名前 "nobetsu-dev" / 証明書のタイプ「コード署名」
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "nobetsu-dev"; then
-  echo "==> signing (nobetsu-dev)"
-  codesign --force --sign "nobetsu-dev" --timestamp=none "$APP"
+#           名前「nobetsu」/ 固有名のタイプ「自己署名ルート」/ 証明書のタイプ「コード署名」
+IDENTITY="nobetsu"
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "\"$IDENTITY\""; then
+  echo "==> signing ($IDENTITY)"
+  codesign --force --sign "$IDENTITY" --timestamp=none "$APP"
 else
   echo "==> signing (ad-hoc)"
-  echo "    ヒント: 自己署名証明書 nobetsu-dev を作ると、ビルドのたびの権限許可し直しがなくなります"
+  echo "    警告: 自己署名証明書「$IDENTITY」が見つかりません。"
+  echo "    アドホック署名では入力監視の許可が下りない場合があります。README を参照してください。"
   codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1
 fi
 
