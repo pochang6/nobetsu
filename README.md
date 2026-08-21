@@ -121,4 +121,7 @@ MacBook Air M4 / macOS 26.5.2 / 日本語の自然な発話 80〜105 秒での�
 
 ## ライセンス
 
-MIT
+MIT — [LICENSE](LICENSE)
+
+音声認識には Apple の `SpeechAnalyzer` / `DictationTranscriber` を使っている。
+モデル本体は OS が管理する Apple の資産であり、このリポジトリには含まれない。
