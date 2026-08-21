@@ -27,8 +27,6 @@ final class Controller: ObservableObject {
     private let overlay = OverlayController()
     private let trigger = TriggerMonitor()
 
-    /// 入力監視のダイアログを出したか。何度も出さないための印
-    private var didProbeInputMonitoring = false
     private var permissionPoll: Timer?
 
     /// この収録で確定した分。表示窓のためだけに持つ
@@ -65,39 +63,24 @@ final class Controller: ObservableObject {
         return true
     }
 
-    /// 許可を求める。
+    /// 入力監視の許可を求める。
     ///
-    /// 自前の案内ウィンドウは作らない。macOS が標準の許可ダイアログを持っていて、
-    /// そこから「システム設定を開く」を選ぶと、一覧にこのアプリが載った状態で開く。
-    /// 普通のアプリと同じ体験になるので、それに乗る。
+    /// 自前の案内ウィンドウは作らない。トリガーの起動を試みること自体が
+    /// macOS 標準の許可ダイアログを呼ぶので、それに乗る。
     ///
-    /// 2つのダイアログが同時に出ると何を操作しているのか分からなくなるため、
-    /// アクセシビリティ → 入力監視 の順に、一つずつ出す。
+    /// 2つの許可を並べて聞かない。必要になる瞬間が違うからだ。
+    /// 入力監視は ⌘ の長押しを待ち受けるために起動した時点で要る。
+    /// アクセシビリティは文字を打ち込むときに要るので、初めて喋ろうとしたときに聞く。
+    /// こうすると同時に2つ出ることがなく、それぞれ必要な理由も伝わる。
     func requestPermissions() {
-        if !Permissions.accessibilityGranted {
-            Permissions.promptForAccessibility()
-        } else {
-            probeInputMonitoring()
-        }
+        activateTrigger()
         startPermissionPoll()
-    }
-
-    /// タップを作ろうとする行為そのものが、入力監視の許可ダイアログを呼ぶ
-    private func probeInputMonitoring() {
-        guard !didProbeInputMonitoring else { return }
-        didProbeInputMonitoring = true
-        _ = Permissions.canCreateEventTap()
     }
 
     private func startPermissionPoll() {
         permissionPoll?.invalidate()
-        permissionPoll = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self else { return }
-                guard Permissions.accessibilityGranted else { return }
-                self.probeInputMonitoring()
-                self.activateTrigger()
-            }
+        permissionPoll = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.activateTrigger() }
         }
     }
 
@@ -107,6 +90,16 @@ final class Controller: ObservableObject {
 
     func start() {
         guard !isRunning else { return }
+
+        // 文字を打ち込むにはアクセシビリティが要る。無いまま始めると
+        // 認識はできているのに何も入らない、という一番わけの分からない状態になる。
+        // 「使おうとした瞬間」である今、OS の許可ダイアログを出す
+        guard Permissions.accessibilityGranted else {
+            status = "文字を入力する許可が必要です"
+            Permissions.promptForAccessibility()
+            return
+        }
+
         committed = ""
         injector.reset()
         engine.start()
@@ -171,9 +164,8 @@ struct NobetsuApp: App {
     var body: some Scene {
         MenuBarExtra {
             if controller.needsPermission {
-                // 救済措置。ダイアログを閉じてしまった人がここから やり直せる
-                Button("許可を求める") { controller.requestPermissions() }
-                Button("アクセシビリティ設定を開く") { Permissions.openAccessibilitySettings() }
+                // 救済措置。ダイアログを閉じてしまった人がここからやり直せる
+                Button("入力監視を許可する") { controller.requestPermissions() }
                 Button("入力監視の設定を開く") { Permissions.openInputMonitoringSettings() }
                 Divider()
                 Text("許可されるまで ⌘ の長押しに反応しません")
