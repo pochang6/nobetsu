@@ -26,7 +26,10 @@ final class Controller: ObservableObject {
     private let injector = TextInjector()
     private let overlay = OverlayController()
     private let trigger = TriggerMonitor()
-    private let coach = PermissionCoach()
+
+    /// 入力監視のダイアログを出したか。何度も出さないための印
+    private var didProbeInputMonitoring = false
+    private var permissionPoll: Timer?
 
     /// この収録で確定した分。表示窓のためだけに持つ
     private var committed = ""
@@ -43,14 +46,8 @@ final class Controller: ObservableObject {
         trigger.onStop = { [weak self] in self?.stop() }
         trigger.rightCommandOnly = rightCommandOnly
 
-        coach.onReady = { [weak self] in self?.activateTrigger() ?? false }
-
-        if coach.presentIfNeeded() {
-            activateTrigger()
-        } else {
-            needsPermission = true
-            status = "許可の設定が必要です"
-        }
+        if activateTrigger() { return }
+        requestPermissions()
     }
 
     /// キーの見張りを起動する。許可が無ければ失敗する
@@ -58,17 +55,50 @@ final class Controller: ObservableObject {
     private func activateTrigger() -> Bool {
         guard trigger.start() else {
             needsPermission = true
-            status = "許可の設定が必要です"
+            status = "許可が必要です"
             return false
         }
         needsPermission = false
         status = "待機中（⌘ 長押しで開始）"
+        permissionPoll?.invalidate()
+        permissionPoll = nil
         return true
     }
 
-    /// メニューから案内をもう一度開く
-    func showPermissionCoach() {
-        coach.present()
+    /// 許可を求める。
+    ///
+    /// 自前の案内ウィンドウは作らない。macOS が標準の許可ダイアログを持っていて、
+    /// そこから「システム設定を開く」を選ぶと、一覧にこのアプリが載った状態で開く。
+    /// 普通のアプリと同じ体験になるので、それに乗る。
+    ///
+    /// 2つのダイアログが同時に出ると何を操作しているのか分からなくなるため、
+    /// アクセシビリティ → 入力監視 の順に、一つずつ出す。
+    func requestPermissions() {
+        if !Permissions.accessibilityGranted {
+            Permissions.promptForAccessibility()
+        } else {
+            probeInputMonitoring()
+        }
+        startPermissionPoll()
+    }
+
+    /// タップを作ろうとする行為そのものが、入力監視の許可ダイアログを呼ぶ
+    private func probeInputMonitoring() {
+        guard !didProbeInputMonitoring else { return }
+        didProbeInputMonitoring = true
+        _ = Permissions.canCreateEventTap()
+    }
+
+    private func startPermissionPoll() {
+        permissionPoll?.invalidate()
+        permissionPoll = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                guard Permissions.accessibilityGranted else { return }
+                self.probeInputMonitoring()
+                self.activateTrigger()
+            }
+        }
     }
 
     // MARK: - 開始と停止
@@ -141,10 +171,12 @@ struct NobetsuApp: App {
     var body: some Scene {
         MenuBarExtra {
             if controller.needsPermission {
-                Button("⚠︎ アクセシビリティを許可する") {
-                    controller.showPermissionCoach()
-                }
-                Text("許可するまで ⌘ の長押しに反応しません")
+                // 救済措置。ダイアログを閉じてしまった人がここから やり直せる
+                Button("許可を求める") { controller.requestPermissions() }
+                Button("アクセシビリティ設定を開く") { Permissions.openAccessibilitySettings() }
+                Button("入力監視の設定を開く") { Permissions.openInputMonitoringSettings() }
+                Divider()
+                Text("許可されるまで ⌘ の長押しに反応しません")
                 Divider()
             } else {
                 Button(controller.isRunning ? "停止" : "話しはじめる") {

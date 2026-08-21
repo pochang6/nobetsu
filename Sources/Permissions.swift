@@ -21,15 +21,23 @@ enum Permissions {
         AXIsProcessTrusted()
     }
 
-    /// システム設定の一覧にこのアプリを登録する。
-    ///
-    /// prompt を **出さない**。出すと Apple 純正の許可ダイアログが現れ、
-    /// こちらの案内ウィンドウと二重に重なって「結局どれを操作すればいいのか」が分からなくなる。
-    /// 案内はこのアプリのウィンドウ1枚に統一し、そこから設定画面へ直接飛ばす。
+    /// 一覧に載せずに登録だけする（起動直後に呼ぶ用）
     @discardableResult
     static func registerForAccessibility() -> Bool {
         let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as NSString
         return AXIsProcessTrustedWithOptions([key: false] as CFDictionary)
+    }
+
+    /// 純正の許可ダイアログを出す。
+    ///
+    /// これを避けて自前の案内だけで済ませようとすると、かえって遠回りになる。
+    /// 純正ダイアログの「システム設定を開く」を押すと、**一覧にこのアプリが載った状態で**
+    /// 設定画面が開く。＋ を押して Finder からアプリを探す手間が丸ごと消える。
+    /// 二重ダイアログを避けたいなら、出さないのではなく、こちらの窓を引っ込めればよい。
+    @discardableResult
+    static func promptForAccessibility() -> Bool {
+        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as NSString
+        return AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
     }
 
     // MARK: - 入力監視
@@ -38,8 +46,16 @@ enum Permissions {
         IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
     }
 
-    /// 入力監視の一覧への登録は、イベントタップを試すことで行われる。
-    /// IOHIDRequestAccess は Apple 純正ダイアログを出してしまうので使わない。
+    /// 純正の許可ダイアログを出す。
+    ///
+    /// アクセシビリティ側と同じく、これが一覧への登録と設定画面への近道を兼ねる。
+    /// さらに許可したあとは macOS 自身が「終了して再度開く」を提案してくれるので、
+    /// 再起動の面倒まで OS が引き受けてくれる。自前で用意するより確実で分かりやすい。
+    @discardableResult
+    static func promptForInputMonitoring() -> Bool {
+        if inputMonitoringGranted { return true }
+        return IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+    }
 
     // MARK: - 実力判定
 
