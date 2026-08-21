@@ -2,3 +2,13 @@ build/
 .DS_Store
 *.xcuserstate
 *.dSYM/
+
+# AI エージェント向けの作業ファイル。公開リポジトリには含めない
+AGENTS.md
+CLAUDE.md
+.claude/
+.cursor/
+.codex/
+.github/copilot-instructions.md
+skills/
+.skills/

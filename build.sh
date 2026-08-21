@@ -5,6 +5,7 @@ cd "$(dirname "$0")"
 
 APP_NAME="nobetsu"
 BUNDLE_ID="dev.pochang6.nobetsu"
+VERSION="$(cat VERSION 2>/dev/null || echo 0.0.0)"
 BUILD_DIR="build"
 APP="$BUILD_DIR/$APP_NAME.app"
 SDK="$(xcrun --show-sdk-path)"
@@ -22,8 +23,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>$APP_NAME</string>
   <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$VERSION</string>
   <key>LSMinimumSystemVersion</key><string>26.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>

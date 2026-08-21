@@ -11,6 +11,8 @@ protocol DictationDelegate: AnyObject {
     func dictation(didFinalize text: String)
     /// 稼働状態が変わった
     func dictation(didChangeRunning running: Bool, message: String)
+    /// これからマイクを起こす。準備は済んでいる
+    func dictationWillBeginCapturing()
 }
 
 /// macOS 26 の DictationTranscriber を使った日本語ストリーミング認識。
@@ -89,6 +91,14 @@ final class DictationEngine {
             resultsTask = consume(module)
 
             try await a.start(inputSequence: stream)
+
+            // マイクを起こす「直前」に知らせる。
+            //
+            // AirPods などの無線イヤホンは、マイクを使い始める瞬間に接続方式が切り替わり、
+            // 0.5秒ほど音が完全に途切れる。その最中に開始音を鳴らすと丸ごと飲み込まれる。
+            // 準備はすべて終わっているので、ここで鳴らしても意味は変わらない
+            delegate?.dictationWillBeginCapturing()
+
             try startAudio(to: format)
 
             isRunning = true
@@ -224,6 +234,14 @@ final class DictationEngine {
         }
         if outcome == .error || out.frameLength == 0 { return nil }
         return out
+    }
+
+    /// 区間をここで区切る。
+    /// 送信などで文脈が切れたとき、次の文を新しい区間として始めるために使う
+    func cutSpan() {
+        guard isRunning, let analyzer else { return }
+        Log.write("engine: 区間を区切る")
+        Task { try? await analyzer.finalize(through: nil) }
     }
 
     // MARK: - 停止

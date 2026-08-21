@@ -28,6 +28,10 @@ final class TriggerMonitor {
 
     var onStart: (() -> Void)?
     var onStop: (() -> Void)?
+    /// 認識中に利用者が自分で入力した（キー入力・クリックなど）
+    var onUserTookOver: (() -> Void)?
+    /// 認識中に Enter で送信した。文脈の切れ目として扱う
+    var onUserSubmitted: (() -> Void)?
     var isRunning = false
 
     private var tap: CFMachPort?
@@ -44,6 +48,12 @@ final class TriggerMonitor {
     private static let keyEscape: Int64 = 53
     private static let keyCommandLeft: Int64 = 55
     private static let keyCommandRight: Int64 = 54
+    private static let keyReturn: Int64 = 36
+    private static let keyEnter: Int64 = 76
+
+    /// 預かった Enter を流すまでの待ち時間。
+    /// 打ち込みが着くには十分で、押した本人には気づかれない程度
+    private static let returnHoldDelay: TimeInterval = 0.12
 
     nonisolated(unsafe) private static weak var current: TriggerMonitor?
 
@@ -151,14 +161,39 @@ final class TriggerMonitor {
             // 呼び出しはコールバックの外へ逃がす。ここで待たせるとタップが切られる
             if isRunning && keyCode == TriggerMonitor.keyEscape {
                 Log.write("ESC → 停止")
+                // 打ち込みは**この場で**止める。停止処理を待つと、
+                // その隙間に溜まっていた文字が流れ込み、止めたあとに句点だけが現れる
+                fireUserTookOver()
                 fireStop()
                 return true
             }
+            // 認識中に利用者が自分でキーを打った。Enter で送信した場合も含む。
+            // こちらの「打ち込み済みの末尾」が当てにならなくなるので知らせる
+            if isRunning {
+                fireUserTookOver()
+
+                // Enter だけは特別扱いする。
+                //
+                // 文字は CGEvent で投げているので、投げてからアプリが処理するまでに間がある。
+                // 送信の直前に投げた1〜2文字が Enter より後に着くと、
+                // 送信し終えて空になった入力欄に、その文字だけが取り残される。
+                // 実際に「。」だけが残る形で再現した。
+                //
+                // そこで Enter を一瞬だけ預かり、こちらの文字が着くのを待ってから流す。
+                if keyCode == TriggerMonitor.keyReturn || keyCode == TriggerMonitor.keyEnter {
+                    onUserSubmitted?()
+                    holdAndReplayReturn(keyCode: keyCode, flags: flags)
+                    return true
+                }
+            }
+
             // ⌘ を押している最中に他のキーが来た＝ショートカット。長押し判定を取り下げる
             if commandDownAt != nil { invalidateHold() }
             return false
 
         case .leftMouseDown, .rightMouseDown:
+            // クリックでカーソルが動いた可能性がある。こちらも基準を失う
+            if isRunning { fireUserTookOver() }
             if commandDownAt != nil { invalidateHold() }
             return false
 
@@ -215,6 +250,8 @@ final class TriggerMonitor {
         let held = Date().timeIntervalSince(heldSince)
         if isRunning && !wasInvalidated && held < holdThreshold {
             Log.write("⌘ の単独タップ → 停止")
+            // ESC と同じ理由で、打ち込みはこの場で止める
+            fireUserTookOver()
             fireStop()
         }
     }
@@ -228,6 +265,34 @@ final class TriggerMonitor {
 
     private func fireStop() {
         DispatchQueue.main.async { [weak self] in self?.onStop?() }
+    }
+
+    /// これだけは**同期で**呼ぶ。
+    ///
+    /// イベントタップのコールバックは、キーがアプリへ届く「前」に呼ばれる。
+    /// ここで打ち込みを止めておかないと、Enter で送信された直後に
+    /// 積んであった1〜2文字が空になった入力欄へ流れ込んでしまう。
+    /// 中身は配列の退避とタイマーの停止だけなので、コールバックを塞ぐ心配はない。
+    private func fireUserTookOver() {
+        onUserTookOver?()
+    }
+
+    /// Enter を飲み込んで、少し置いてから同じものを流し直す。
+    /// 修飾キーはそのまま引き継ぐ（⌘Enter や Shift+Enter を壊さないため）。
+    /// 流し直す側には自分の印を付けて、再びここへ戻ってこないようにする。
+    private func holdAndReplayReturn(keyCode: Int64, flags: CGEventFlags) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + TriggerMonitor.returnHoldDelay) {
+            guard let source = CGEventSource(stateID: .combinedSessionState) else { return }
+            for isDown in [true, false] {
+                guard let event = CGEvent(keyboardEventSource: source,
+                                          virtualKey: CGKeyCode(keyCode),
+                                          keyDown: isDown) else { continue }
+                event.flags = flags
+                event.setIntegerValueField(.eventSourceUserData,
+                                           value: TriggerMonitor.injectedMagic)
+                event.post(tap: .cgAnnotatedSessionEventTap)
+            }
+        }
     }
 
     private func invalidateHold() {
