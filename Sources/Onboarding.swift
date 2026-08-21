@@ -19,6 +19,7 @@ final class PermissionCoach {
 
     private var window: NSWindow?
     private var pollTimer: Timer?
+    private var waitingSince: Date?
     private let model = CoachModel()
 
     var isTrusted: Bool { AXIsProcessTrusted() }
@@ -36,6 +37,9 @@ final class PermissionCoach {
     func present() {
         if window == nil { build() }
         model.granted = isTrusted
+        model.message = ""
+        model.showTroubleshooting = false
+        waitingSince = Date()
 
         NSApp.activate(ignoringOtherApps: true)
         window?.center()
@@ -47,6 +51,7 @@ final class PermissionCoach {
         let view = CoachView(
             model: model,
             openSettings: { [weak self] in self?.openAccessibilitySettings() },
+            recheck: { [weak self] in self?.recheck() },
             dismiss: { [weak self] in self?.close() })
 
         let controller = NSHostingController(rootView: view)
@@ -56,7 +61,7 @@ final class PermissionCoach {
         w.titlebarAppearsTransparent = true
         w.isReleasedWhenClosed = false
         w.level = .floating
-        w.setContentSize(NSSize(width: 520, height: 470))
+        w.setContentSize(NSSize(width: 560, height: 560))
         window = w
     }
 
@@ -71,8 +76,24 @@ final class PermissionCoach {
     private func startPolling() {
         pollTimer?.invalidate()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.checkNow() }
+            Task { @MainActor in self?.tick() }
         }
+    }
+
+    private func tick() {
+        // しばらく待っても変わらないなら、たいてい署名が変わったせいで
+        // 「一覧はオンなのに拒否される」状態になっている。その対処を画面に出す
+        if let since = waitingSince, Date().timeIntervalSince(since) > 6, !model.granted {
+            model.showTroubleshooting = true
+        }
+        checkNow()
+    }
+
+    /// ボタンから手動で確認する
+    func recheck() {
+        model.message = isTrusted ? "" : "まだ許可が確認できません。"
+        model.showTroubleshooting = true
+        checkNow()
     }
 
     private func checkNow() {
@@ -86,12 +107,12 @@ final class PermissionCoach {
         // できなければプロセスを入れ替える。どちらにせよユーザーは何もしなくていい
         let activated = onGranted?() ?? false
         if activated {
-            model.message = "有効になりました。⌘ を長押しすると始まります。"
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            model.message = "設定が完了しました。⌘ を長押しすると話しはじめられます。"
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
                 self?.close()
             }
         } else {
-            model.message = "反映のため、nobetsu を入れ替えています…"
+            model.message = "設定を反映しています。まもなく使えるようになります…"
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 PermissionCoach.relaunch()
             }
@@ -128,61 +149,103 @@ final class PermissionCoach {
 final class CoachModel: ObservableObject {
     @Published var granted = false
     @Published var message = ""
+    @Published var showTroubleshooting = false
 }
 
 private struct CoachView: View {
     @ObservedObject var model: CoachModel
     let openSettings: () -> Void
+    let recheck: () -> Void
     let dismiss: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 16) {
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("あと1つだけ、許可が必要です")
+                Text("アクセシビリティの許可をお願いします")
                     .font(.system(size: 20, weight: .semibold))
-                Text("nobetsu は、話した内容を今使っているアプリに直接打ち込みます。\nそのために macOS の「アクセシビリティ」の許可が要ります。")
+                Text("nobetsu は、話した内容をそのとき使っているアプリへ直接入力します。\nmacOS ではこの動作に「アクセシビリティ」の許可が必要です。")
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             VStack(alignment: .leading, spacing: 10) {
-                step(1, "下のボタンで設定を開く",
-                     "「プライバシーとセキュリティ > アクセシビリティ」が開きます")
-                step(2, "一覧の nobetsu をオンにする",
-                     "見つからない場合は左下の + から nobetsu.app を追加してください")
-                step(3, "あとは何もしなくていい",
-                     "許可を自動で見つけて有効にします。再起動も不要です")
+                step(1, "「アクセシビリティ設定を開く」を押してください",
+                     "「プライバシーとセキュリティ」の中のアクセシビリティが開きます")
+                step(2, "一覧から nobetsu を探して、オンにしてください",
+                     "一覧に見当たらない場合は、左下の + から nobetsu.app を追加してください")
+                step(3, "オンにしたら、この画面に戻ってきてください",
+                     "許可を確認しだい自動で有効になり、この画面は閉じます")
             }
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
 
-            HStack(spacing: 8) {
-                Image(systemName: model.granted ? "checkmark.circle.fill" : "circle.dotted")
-                    .foregroundStyle(model.granted ? Color.green : Color.secondary)
-                Text(model.granted
-                     ? (model.message.isEmpty ? "許可を確認しました" : model.message)
-                     : "許可を待っています…")
-                    .font(.system(size: 12))
-                    .foregroundStyle(model.granted ? .primary : .secondary)
+            statusRow
+
+            if model.showTroubleshooting && !model.granted {
+                troubleshooting
             }
 
             Spacer(minLength: 0)
 
-            HStack {
-                Button("あとで") { dismiss() }
+            HStack(spacing: 10) {
+                Button("閉じる") { dismiss() }
+                Text("メニューバーの ⚠︎ からいつでも開き直せます")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
                 Spacer()
+                Button("もう一度確認する") { recheck() }
+                    .disabled(model.granted)
                 Button(action: openSettings) {
-                    Text("アクセシビリティ設定を開く").frame(minWidth: 180)
+                    Text("アクセシビリティ設定を開く").frame(minWidth: 170)
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(model.granted)
             }
         }
         .padding(24)
-        .frame(width: 520, height: 470)
+        .frame(width: 560, height: 560)
+    }
+
+    private var statusRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: model.granted ? "checkmark.circle.fill" : "circle.dotted")
+                .foregroundStyle(model.granted ? Color.green : Color.secondary)
+            Text(statusText)
+                .font(.system(size: 12))
+                .foregroundStyle(model.granted ? .primary : .secondary)
+        }
+    }
+
+    private var statusText: String {
+        if model.granted {
+            return model.message.isEmpty ? "許可を確認しました" : model.message
+        }
+        return model.message.isEmpty ? "許可を確認しています…" : model.message
+    }
+
+    /// 「一覧ではオンになっているのに有効にならない」ときの対処。
+    /// 開発中のビルドは署名が毎回変わるため、macOS が別のアプリとして扱って拒否する
+    private var troubleshooting: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("すでにオンになっているのに、この画面が変わらない場合", systemImage: "lightbulb")
+                .font(.system(size: 12, weight: .medium))
+            Text("""
+                 一覧の nobetsu を、一度オフにしてから、もう一度オンにしてください。それで解決します。
+
+                 アプリを更新すると macOS からは別のアプリに見えることがあり、
+                 表示はオンのままでも、実際には許可されていない状態になります。
+                 開発中のビルドで起きる現象で、配布版では起きません。
+                 """)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func step(_ number: Int, _ title: String, _ detail: String) -> some View {
