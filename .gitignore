@@ -3,12 +3,6 @@ build/
 *.xcuserstate
 *.dSYM/
 
-# AI エージェント向けの作業ファイル。公開リポジトリには含めない
-AGENTS.md
-CLAUDE.md
-.claude/
-.cursor/
-.codex/
-.github/copilot-instructions.md
-skills/
-.skills/
+# 個人環境に依存する設定。CLAUDE.md と .claude/skills/ は共有したいので残す
+.claude/settings.local.json
+CLAUDE.local.md
