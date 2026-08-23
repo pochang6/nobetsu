@@ -20,7 +20,9 @@ final class PhraseBook {
 
     static let shared = PhraseBook()
 
-    private(set) var rules: [(from: String, to: String)] = []
+    typealias Rule = (from: String, to: String)
+
+    private(set) var rules: [Rule] = []
     /// 直近に読み込んだファイルとその更新時刻。中身が変わっていなければ読み直さない
     private var stamps: [URL: Date] = [:]
 
@@ -63,36 +65,56 @@ final class PhraseBook {
     }
 
     private func load(_ files: [URL]) {
-        var table: [String: String] = [:]
+        var pairs: [Rule] = []
         var counts: [String] = []
 
         for url in files {
             guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
             let parsed = PhraseBook.parse(text)
             // 後から読んだ方（個人辞書）が勝つ
-            for rule in parsed {
-                // **左が右の一部になっている規則は捨てる。**
-                //
-                // 「品予約履歴 => 備品予約履歴」を許すと、正しく「備品予約履歴」と
-                // 認識されたときにも中の「品予約履歴」が引っかかり、
-                // 「備備品予約履歴」になる。直したものを、もう一度直しにいってしまう。
-                // 直せば直すほど壊れる規則なので、書けないことにする
-                if rule.to.contains(rule.from) {
-                    Log.write("phrases: 「\(rule.from) => \(rule.to)」は左が右の一部なので使わない")
-                    continue
-                }
-                table[rule.from] = rule.to
-            }
+            pairs.append(contentsOf: parsed)
             counts.append("\(url.lastPathComponent)=\(parsed.count)")
         }
 
-        // 長い言い回しから先に当てる。
-        // 「苦労」より「苦労してくる」を先に見ないと、短い方に食われる
-        rules = table
-            .map { (from: $0.key, to: $0.value) }
-            .sorted { $0.from.count > $1.from.count }
-
+        let built = PhraseBook.build(from: pairs)
+        rules = built.rules
+        for rejected in built.rejected {
+            Log.write("phrases: 「\(rejected)」は左が右の一部なので使わない")
+        }
         Log.write("phrases: 辞書を読み込んだ \(rules.count) 件 [\(counts.joined(separator: " "))]")
+    }
+
+    /// 読み込んだ組を、当てられる形に整える。
+    ///
+    /// **左が右の一部になっている規則は捨てる。**
+    /// 「品予約履歴 => 備品予約履歴」を許すと、正しく「備品予約履歴」と認識されたときにも
+    /// 中の「品予約履歴」が引っかかり、「備備品予約履歴」になる。
+    /// 直したものを、もう一度直しにいってしまう。直せば直すほど壊れる規則なので、使わない。
+    ///
+    /// **長い言い回しから先に当てる。**
+    /// 「苦労」より「苦労してくる」を先に見ないと、短い方に食われる。
+    /// 同じ長さのときは左辺の順に並べる。並び順が毎回変わると、結果も変わってしまう。
+    ///
+    /// 副作用が無いので、ここだけ取り出して確かめられる（`./test.sh`）
+    nonisolated static func build(from pairs: [Rule]) -> (rules: [Rule], rejected: [String]) {
+        var table: [String: String] = [:]
+        var rejected: [String] = []
+
+        for rule in pairs {
+            if rule.to.contains(rule.from) {
+                rejected.append("\(rule.from) => \(rule.to)")
+                continue
+            }
+            table[rule.from] = rule.to
+        }
+
+        var rules: [Rule] = table.map { (from: $0.key, to: $0.value) }
+        rules.sort { a, b in
+            if a.from.count != b.from.count { return a.from.count > b.from.count }
+            return a.from < b.from
+        }
+
+        return (rules, rejected)
     }
 
     // MARK: - 適用
@@ -103,6 +125,11 @@ final class PhraseBook {
     /// ここは前後の状態を持たない純粋な置換でよい。
     /// 途中で一瞬おかしな形に化けても、次の更新で正しく打ち直される。
     func apply(to text: String) -> String {
+        PhraseBook.apply(text, rules: rules)
+    }
+
+    /// 副作用が無いので、ここだけ取り出して確かめられる（`./test.sh`）
+    nonisolated static func apply(_ text: String, rules: [Rule]) -> String {
         guard !rules.isEmpty, !text.isEmpty else { return text }
         var out = text
         for rule in rules {
@@ -115,8 +142,8 @@ final class PhraseBook {
     // MARK: - 解析
 
     /// 1行1組。区切りは `=>` か `→` かタブ。`#` から行末まではコメント
-    nonisolated static func parse(_ text: String) -> [(from: String, to: String)] {
-        var result: [(String, String)] = []
+    nonisolated static func parse(_ text: String) -> [Rule] {
+        var result: [Rule] = []
 
         for rawLine in text.components(separatedBy: .newlines) {
             var line = rawLine

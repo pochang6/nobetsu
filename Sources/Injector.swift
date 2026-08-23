@@ -241,8 +241,13 @@ final class TextInjector {
     /// 送信済みの文章はもう相手の手元にあり、こちらから直す手立ては無い。
     /// 直せないものは、追いかけないのが正しい
     private func canFollow(_ text: String) -> Bool {
+        TextInjector.canFollow(pending: pending, next: Array(text), virtualPrefix: virtualPrefix)
+    }
+
+    /// 副作用が無いので、ここだけ取り出して確かめられる（`./test.sh`）
+    nonisolated static func canFollow(pending: [Character], next: [Character], virtualPrefix: Int) -> Bool {
         guard virtualPrefix > 0 else { return true }
-        return commonPrefixLength(pending, Array(text)) >= virtualPrefix
+        return commonPrefixLength(pending, next) >= virtualPrefix
     }
 
     /// この区間はもう追えない。次の確定まで何も打たない
@@ -307,10 +312,7 @@ final class TextInjector {
     /// 共通接頭辞は据え置き、食い違った末尾だけを削除して打ち直す。
     private func apply(_ text: String) {
         let next = Array(text)
-        let common = commonPrefixLength(pending, next)
-
-        let deleteCount = pending.count - common
-        let insert = String(next[common...])
+        let (deleteCount, insert) = TextInjector.diff(pending: pending, next: next)
 
         guard deleteCount > 0 || !insert.isEmpty else { return }
 
@@ -327,7 +329,16 @@ final class TextInjector {
         if !insert.isEmpty { sendText(insert) }
     }
 
-    private func commonPrefixLength(_ a: [Character], _ b: [Character]) -> Int {
+    /// 打ち込み済みの `pending` を `next` の状態へ持っていくのに必要な操作。
+    /// 共通接頭辞は据え置き、食い違った末尾だけを消して打ち直す。
+    ///
+    /// 副作用が無いので、ここだけ取り出して確かめられる（`./test.sh`）
+    nonisolated static func diff(pending: [Character], next: [Character]) -> (delete: Int, insert: String) {
+        let common = commonPrefixLength(pending, next)
+        return (pending.count - common, String(next[common...]))
+    }
+
+    nonisolated static func commonPrefixLength(_ a: [Character], _ b: [Character]) -> Int {
         var i = 0
         let n = min(a.count, b.count)
         while i < n, a[i] == b[i] { i += 1 }

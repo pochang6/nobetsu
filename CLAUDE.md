@@ -32,6 +32,23 @@ open /Applications/nobetsu.app  # 起動
 | 波形 | 待機中 |
 | 波形＋丸 | 認識中 |
 
+## テスト
+
+```bash
+./test.sh
+```
+
+副作用を持たない部分だけを確かめます（辞書の置換と、打ち込みの差分計算）。
+アプリは起動しません。`Sources/App.swift` を含めないのは `@main` が衝突するためです。
+
+**この2つを選んだ理由**は、間違えると利用者の書きかけの文章を壊すからです。
+`Injector` の差分計算を誤ると Backspace が他人の文章を削りにいきますし、
+辞書の置換が冪等でないと、打ち直すたびに文章が壊れていきます。
+
+新しく純粋な処理を書いたら、ここに足してください。
+逆に、マイク・イベントタップ・他アプリへの打ち込みは実機でしか確かめられません。
+そちらは `.claude/skills/rebuild/` の手順で動かして見ます。
+
 ## ログ
 
 ```bash
@@ -68,6 +85,7 @@ macOS の許可は**署名の同一性**に紐づきます。アドホック署�
 | `Sources/Trigger.swift` | `CGEventTap` によるキーの見張り |
 | `Sources/FocusWatcher.swift` | 入力先から離れたかの見張り。離れたら止める |
 | `Sources/Phrases.swift` | 辞書（言い換え表）の読み込みと適用 |
+| `Tests/main.swift` | 副作用を持たない部分のテスト。`./test.sh` で走る |
 | `Sources/Indicator.swift` | 認識中の目印（左上に浮く小さな表示） |
 | `Sources/Overlay.swift` | 認識中の文字を流す表示（既定で無効） |
 | `Sources/Permissions.swift` | 入力監視とアクセシビリティの判定と要求 |
