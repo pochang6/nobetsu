@@ -25,6 +25,11 @@ enum Sounds {
     /// 終了
     static func playStop() { play(stopID, "終了音") }
 
+    /// 自分から止めたのではなく、入力先から離れたので止まった。
+    /// **終了音と同じにしてはいけない。** 押していないのに終わったとき、
+    /// 何が起きたのか分からないまま音だけ鳴ると、驚くだけで手掛かりにならない
+    static func playAutoStop() { play(autoStopID, "自動停止音") }
+
     /// 何かに失敗したとき
     static func playFailure() { play(failureID, "失敗音") }
 
@@ -32,6 +37,7 @@ enum Sounds {
 
     private static let startID = register("Glass")
     private static let stopID = register("Pop")
+    private static let autoStopID = register("Submarine")
     private static let failureID = register("Basso")
 
     private static func register(_ name: String) -> SystemSoundID? {

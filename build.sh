@@ -48,6 +48,14 @@ swiftc \
   Sources/*.swift \
   -o "$APP/Contents/MacOS/$APP_NAME"
 
+# 辞書はアプリの中へ焼き込む。
+# git で管理されるので、複数の Mac で同じ辞書を共有できる。
+# その Mac だけの調整は ~/Library/Application Support/nobetsu/dictionary.txt へ書く
+if [ -f dictionary.txt ]; then
+  cp dictionary.txt "$APP/Contents/Resources/dictionary.txt"
+  echo "==> dictionary: $(grep -cE '^[^#]*(=>|→)' dictionary.txt) 件"
+fi
+
 # macOS の許可（アクセシビリティ / 入力監視）は、署名の同一性に紐づいて記録される。
 # アドホック署名にはその同一性が無いため、ビルドのたびに別アプリ扱いになり、
 # 入力監視にいたっては尋ねられることすらなく拒否されることがある。

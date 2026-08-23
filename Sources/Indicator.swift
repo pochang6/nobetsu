@@ -31,6 +31,9 @@ final class IndicatorController {
     private let model = IndicatorModel()
     private var moveObserver: NSObjectProtocol?
     private var cursorKeeper: Timer?
+    /// 直近に文字を打ち込んだ時刻。カーソルが隠されるのはこの直後だけ
+    private var lastInjectAt = Date.distantPast
+    private var lastNudgeAt = Date.distantPast
 
     private static let size = NSSize(width: 222, height: 42)
 
@@ -51,29 +54,94 @@ final class IndicatorController {
         startCursorKeeper()
     }
 
-    /// 目印の上ではカーソルを消さない。
+    /// 音声入力の間、マウスカーソルを消させない。
     ///
     /// macOS はキー入力中にマウスカーソルを隠す。nobetsu は文字を打ち込み続けるので、
-    /// その仕様が延々と発動し、ボタンを押そうと近づいた瞬間にカーソルが消えてしまう。
-    /// 目印の上に居る間だけ、打ち消し続ける
+    /// その仕様が延々と発動し、押そうと近づいた瞬間に消える・動かすと出る、を繰り返す
     private func startCursorKeeper() {
         cursorKeeper?.invalidate()
         cursorKeeper = Timer.scheduledTimer(withTimeInterval: 0.04, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.keepCursorVisibleIfHovered() }
+            Task { @MainActor in self?.keepCursorVisible() }
         }
     }
 
-    /// 打ち込んだ直後にも呼ぶ。
-    /// 一定間隔で出し直すだけだと、その合間に打ち込みが走って再び隠れ、点滅して見える。
-    /// 隠される瞬間と出し直す瞬間を対にすると、ちらつかない
-    func keepCursorVisibleIfHovered() {
+    /// 打ち込んだ直後に呼ばれる
+    func didInjectText() {
+        lastInjectAt = Date()
+        keepCursorVisible()
+    }
+
+    /// **音声入力中は、マウスカーソルを消させない。**
+    ///
+    /// はじめは目印の上にいるときだけ出し直していたが、それでは足りなかった。
+    /// 喋りながら画面を見て、スクロールしたり動画を選んだりする使い方では、
+    /// カーソルは画面のどこにでもいる。打つたびに消えて、動かすと出る、を繰り返すと
+    /// ちらついて目障りなだけでなく、いまどこを指しているのか分からなくなる。
+    ///
+    /// 打ち込みが続いている間だけに絞る。打っていなければ、誰も隠さない
+    func keepCursorVisible() {
         guard let panel, panel.isVisible else { return }
-        guard panel.frame.contains(NSEvent.mouseLocation) else { return }
+
         NSCursor.setHiddenUntilMouseMoves(false)
         NSCursor.unhide()
+
+        guard Date().timeIntervalSince(lastInjectAt) < 0.6 else { return }
+        guard Date().timeIntervalSince(lastNudgeAt) > 0.05 else { return }
+        lastNudgeAt = Date()
+        nudgeCursor()
+    }
+
+    /// カーソルを 1 ピクセルだけ動かして、戻す。
+    ///
+    /// `NSCursor.unhide()` では出てこない。**隠しているのは相手のアプリだから。**
+    /// macOS は文字が打たれるとカーソルを隠す。隠すのは打ち込み先のアプリであって、
+    /// こちらではない。別のプロセスが隠したものを、こちらから出すことはできない。
+    ///
+    /// ただし macOS は「マウスが**動いたら**出す」。
+    /// はじめは同じ位置へ動いたことにしてみたが、それでは出てこなかった。
+    /// 動いていないものは動いたことにならない。
+    /// そこで、画面の外へ出ない向きへ 1 ピクセルだけ動かして、すぐ戻す。
+    /// 最終的な位置は変わらないので、利用者には分からない。
+    ///
+    /// 打ち込みが続いている間だけに絞る。常に流すと、目印を掴んで動かしている最中にも
+    /// 割り込むことになる
+    private func nudgeCursor() {
+        guard let primary = NSScreen.screens.first else { return }
+        let location = NSEvent.mouseLocation
+        // 画面の外へ出ない向きへ 1 ピクセル。戻すので最終位置は変わらない
+        let step: CGFloat = location.x <= primary.frame.midX ? 1 : -1
+
+        // NSEvent は左下が原点、CGEvent は左上が原点
+        let y = primary.frame.maxY - location.y
+        moveCursor(to: CGPoint(x: location.x + step, y: y))
+        moveCursor(to: CGPoint(x: location.x, y: y))
+    }
+
+    private func moveCursor(to point: CGPoint) {
+        guard let source = CGEventSource(stateID: .combinedSessionState),
+              let move = CGEvent(mouseEventSource: source,
+                                 mouseType: .mouseMoved,
+                                 mouseCursorPosition: point,
+                                 mouseButton: .left)
+        else { return }
+
+        // 自分が出したものだと分かるようにしておく（見張りが拾わないように）
+        move.setIntegerValueField(.eventSourceUserData, value: TriggerMonitor.injectedMagic)
+        move.post(tap: .cgAnnotatedSessionEventTap)
     }
 
     func hide() {
+        // 消える前に、隠れたままのカーソルを出しておく。
+        // 打ち込みが終わってから出し直す機会は、もう無い
+        if let panel, panel.isVisible { nudgeCursor() }
+
+        // 目印が消えたら見張りも止める。
+        // 消したのに 25Hz のタイマーが回り続けると、何もしていない間もメインスレッドを刻む。
+        // ここはキーの見張り（イベントタップ）と同じスレッドなので、
+        // 混み合うとタップごと OS に無効化され、キー入力が効かなくなる
+        cursorKeeper?.invalidate()
+        cursorKeeper = nil
+
         guard let panel, panel.isVisible else { return }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.35
@@ -90,7 +158,7 @@ final class IndicatorController {
 
     /// 置き場所を初期位置に戻す
     func resetPosition() {
-        Defaults.indicatorOrigin = nil
+        Defaults.indicatorOffset = nil
         guard let panel else { return }
         panel.setFrameOrigin(defaultOrigin())
     }
@@ -134,8 +202,13 @@ final class IndicatorController {
             queue: .main
         ) { note in
             guard let moved = note.object as? NSWindow else { return }
-            let origin = moved.frame.origin
-            Task { @MainActor in Defaults.indicatorOrigin = origin }
+            // 覚えるのは画面のどこか（左下からの距離）。絶対の座標で覚えると、
+            // 別の画面で使ったときに画面の外や見当違いの場所へ出る
+            let frame = moved.frame
+            let screen = NSScreen.screens.first { $0.frame.intersects(frame) }
+            guard let visible = screen?.visibleFrame else { return }
+            let offset = NSPoint(x: frame.minX - visible.minX, y: frame.minY - visible.minY)
+            Task { @MainActor in Defaults.indicatorOffset = offset }
         }
 
         panel = p
@@ -149,11 +222,33 @@ final class IndicatorController {
 
     // MARK: - 位置
 
+    /// いま作業している画面。
+    ///
+    /// **メインディスプレイに出してはいけない。**
+    /// サブモニターで喋っているのに、目印だけメインに出ては誰も気づけない。
+    /// `NSScreen.main` は「自分のキーウィンドウがある画面」なので、
+    /// キーウィンドウを持たないこのアプリでは常にメインを指してしまう。
+    ///
+    /// マウスのいる画面を使う。喋りはじめる直前に入力欄を押しているので、
+    /// たいていそこが作業している画面になる
+    private func currentScreen() -> NSScreen? {
+        let mouse = NSEvent.mouseLocation
+        return NSScreen.screens.first { $0.frame.contains(mouse) }
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
+    }
+
+    /// 覚えた位置は「画面の左下からの距離」なので、どの画面でも同じ場所に出る
     private func savedOrigin(for panel: NSPanel) -> NSPoint {
-        guard let saved = Defaults.indicatorOrigin, isOnScreen(saved) else {
-            return defaultOrigin()
-        }
-        return saved
+        guard let screen = currentScreen() else { return NSPoint(x: 200, y: 300) }
+        guard let offset = Defaults.indicatorOffset else { return defaultOrigin() }
+
+        let visible = screen.visibleFrame
+        let size = IndicatorController.size
+        // 画面の大きさは同じとは限らない。はみ出すなら画面の中へ寄せる
+        let x = min(max(visible.minX + offset.x, visible.minX), visible.maxX - size.width)
+        let y = min(max(visible.minY + offset.y, visible.minY), visible.maxY - size.height)
+        return NSPoint(x: x, y: y)
     }
 
     /// 画面の左から 1/3 のあたりに**右端**が来るように置き、高さは下から約 1/3。
@@ -161,7 +256,7 @@ final class IndicatorController {
     /// 目印の左端を 1/3 に合わせると、体感では中央寄りに見えて邪魔になる。
     /// 幅のぶんだけ左にずらし、そこから少しだけ右に戻したところが落ち着く。
     private func defaultOrigin() -> NSPoint {
-        guard let screen = NSScreen.main else { return NSPoint(x: 200, y: 300) }
+        guard let screen = currentScreen() else { return NSPoint(x: 200, y: 300) }
         let visible = screen.visibleFrame
         let size = IndicatorController.size
         return NSPoint(
@@ -169,11 +264,6 @@ final class IndicatorController {
             y: visible.minY + visible.height / 3)
     }
 
-    /// 外付けディスプレイを外したあとなど、画面の外に保存されていることがある
-    private func isOnScreen(_ origin: NSPoint) -> Bool {
-        let rect = NSRect(origin: origin, size: IndicatorController.size)
-        return NSScreen.screens.contains { $0.visibleFrame.intersects(rect) }
-    }
 
     deinit {
         if let moveObserver {

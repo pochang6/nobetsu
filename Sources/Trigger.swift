@@ -10,7 +10,9 @@ import CoreGraphics
 ///
 /// ⌘ は macOS のあらゆるショートカットの起点なので、素朴に「長押しで発火」にすると
 /// ⌘Tab や ⌘S を打とうとして一瞬ためらっただけで暴発する。
-/// そこで **押している間に他のキーやクリックが来たら、それはショートカットだと見なして取り下げる**。
+/// そこで **押している間に他のキーやクリック、ホイールが来たら、
+/// それはショートカットだと見なして取り下げる**。
+/// ⌘＋ホイールの拡大縮小（Figma など）で暴発したのが、ホイールを見るようになった理由。
 ///
 /// CGEventTap を使うのは、認識中の ESC を「横取りして飲み込む」必要があるため。
 /// Carbon の RegisterEventHotKey ではイベントを消せない。
@@ -68,7 +70,9 @@ final class TriggerMonitor {
             (1 << CGEventType.keyDown.rawValue) |
             (1 << CGEventType.flagsChanged.rawValue) |
             (1 << CGEventType.leftMouseDown.rawValue) |
-            (1 << CGEventType.rightMouseDown.rawValue)
+            (1 << CGEventType.rightMouseDown.rawValue) |
+            (1 << CGEventType.otherMouseDown.rawValue) |
+            (1 << CGEventType.scrollWheel.rawValue)
 
         guard let port = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
@@ -128,15 +132,20 @@ final class TriggerMonitor {
 
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let flags = event.flags
+        // 慣性で流れているだけのホイールか。指はもう離れている
+        let momentum = type == .scrollWheel
+            ? event.getIntegerValueField(.scrollWheelEventMomentumPhase)
+            : 0
 
         let swallow = MainActor.assumeIsolated {
-            monitor.handle(type: type, keyCode: keyCode, flags: flags)
+            monitor.handle(type: type, keyCode: keyCode, flags: flags, momentum: momentum)
         }
         return swallow ? nil : Unmanaged.passUnretained(event)
     }
 
     /// 戻り値 true でイベントを飲み込む
-    private func handle(type: CGEventType, keyCode: Int64, flags: CGEventFlags) -> Bool {
+    private func handle(type: CGEventType, keyCode: Int64, flags: CGEventFlags,
+                        momentum: Int64) -> Bool {
 
         switch type {
 
@@ -181,7 +190,15 @@ final class TriggerMonitor {
                 //
                 // そこで Enter を一瞬だけ預かり、こちらの文字が着くのを待ってから流す。
                 if keyCode == TriggerMonitor.keyReturn || keyCode == TriggerMonitor.keyEnter {
-                    onUserSubmitted?()
+                    // Shift+Enter は「送信」ではなく「改行」。
+                    //
+                    // 多くの入力欄で、Enter は送信、Shift+Enter は行を足すだけ、と分かれている。
+                    // これを送信として扱うと区間を切ってしまい、
+                    // 空行を入れてから続きを喋りはじめても、数秒のあいだ何も入らない。
+                    // 改行は文章の途中なので、区間は切らずにそのまま続ける
+                    let isNewline = flags.contains(.maskShift)
+                    Log.write("Enter (\(isNewline ? "Shift＝改行" : "送信")) → 一瞬預かる")
+                    if !isNewline { onUserSubmitted?() }
                     holdAndReplayReturn(keyCode: keyCode, flags: flags)
                     return true
                 }
@@ -191,10 +208,20 @@ final class TriggerMonitor {
             if commandDownAt != nil { invalidateHold() }
             return false
 
-        case .leftMouseDown, .rightMouseDown:
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
             // クリックでカーソルが動いた可能性がある。こちらも基準を失う
             if isRunning { fireUserTookOver() }
             if commandDownAt != nil { invalidateHold() }
+            return false
+
+        case .scrollWheel:
+            // ⌘ を押しながらのホイールは拡大縮小（Figma、ブラウザ、地図など）。
+            // これはショートカットなので、長押しと見なしてはいけない。
+            //
+            // 慣性で流れているだけのものは無視する。指はもう離れているので、
+            // スクロールした直後に ⌘ を長押ししたときまで巻き添えにしない。
+            // スクロールは文字の位置を動かさないので、認識中でも何もしない
+            if commandDownAt != nil, momentum == 0 { invalidateHold() }
             return false
 
         default:

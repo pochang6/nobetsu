@@ -6,3 +6,8 @@ build/
 # 個人環境に依存する設定。CLAUDE.md と .claude/skills/ は共有したいので残す
 .claude/settings.local.json
 CLAUDE.local.md
+
+# 個人辞書。**絶対に追跡しない。**
+# 誤変換を拾って育てる仕組みなので、中身は仕事の固有名詞やその日考えていたことの記録に近い。
+# 公開用のテンプレートは dictionary.sample.txt（PUBLISH.md 参照）
+/dictionary.txt

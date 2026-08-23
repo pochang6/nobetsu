@@ -11,8 +11,8 @@ protocol DictationDelegate: AnyObject {
     func dictation(didFinalize text: String)
     /// 稼働状態が変わった
     func dictation(didChangeRunning running: Bool, message: String)
-    /// これからマイクを起こす。準備は済んでいる
-    func dictationWillBeginCapturing()
+    /// マイクが本当に聞ける状態になった
+    func dictationDidBeginCapturing()
 }
 
 /// macOS 26 の DictationTranscriber を使った日本語ストリーミング認識。
@@ -44,6 +44,10 @@ final class DictationEngine {
     private var resultsTask: Task<Void, Never>?
 
     private let locale = Locale(identifier: "ja-JP")
+
+    /// マイクが動きはじめてから開始音を鳴らすまでの間。
+    /// 無線イヤホンの接続切り替えをやり過ごすだけの長さがあればよい
+    private static let startSoundSettle: TimeInterval = 0.25
 
     // MARK: - 開始
 
@@ -92,17 +96,24 @@ final class DictationEngine {
 
             try await a.start(inputSequence: stream)
 
-            // マイクを起こす「直前」に知らせる。
-            //
-            // AirPods などの無線イヤホンは、マイクを使い始める瞬間に接続方式が切り替わり、
-            // 0.5秒ほど音が完全に途切れる。その最中に開始音を鳴らすと丸ごと飲み込まれる。
-            // 準備はすべて終わっているので、ここで鳴らしても意味は変わらない
-            delegate?.dictationWillBeginCapturing()
-
             try startAudio(to: format)
 
             isRunning = true
             notify(true, "認識中")
+
+            // 開始音は「**本当に聞ける状態になってから**」鳴らす。
+            //
+            // 以前はマイクを起こす直前に鳴らしていた。無線イヤホンの接続切り替えに
+            // 音が飲まれるのを避けるためだったが、**先頭の一文字が入らない**という
+            // 別の問題を生んだ。音が鳴った瞬間に喋りはじめるのが自然なので、
+            // その時点でまだ聞けていなければ、頭が削られる。
+            //
+            // 少し置くのは、無線イヤホンの切り替え（0.5秒ほど音が途切れる）を
+            // やり過ごすため。マイクは既に動いているので、この間に喋っても取りこぼさない
+            DispatchQueue.main.asyncAfter(deadline: .now() + DictationEngine.startSoundSettle) { [weak self] in
+                guard let self, self.isRunning else { return }
+                self.delegate?.dictationDidBeginCapturing()
+            }
         } catch {
             notify(false, "開始できませんでした: \(error.localizedDescription)")
             await stopAsync()

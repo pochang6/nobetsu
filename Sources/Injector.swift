@@ -40,6 +40,21 @@ final class TextInjector {
     /// 送信などで文脈が切れた。今の区間はもう打ち込まない
     private var discardCurrentSpan = false
 
+    /// この区間はもう追いかけられない。次の確定まで何も打たない
+    private var unfollowable = false
+
+    /// `pending` の先頭のうち、**実際には入力欄に無い**文字数。
+    ///
+    /// 送信したあとも喋り続けている場合、送信済みの文章を「打ち込み済み」と見なして
+    /// 差分を取る。そうすれば続きだけが空の入力欄へ入る。
+    /// ただしその部分は画面上に存在しないので、**絶対に消しにいってはいけない**
+    private var virtualPrefix = 0
+
+    /// 送信した瞬間までに打ち込んであった内容。
+    /// 認識器は同じ区間を喋り続けているので、次に届く未確定テキストはこれで始まる。
+    /// 「これより先に増えた分」＝送信したあとに喋った分、として拾い直す
+    private var submittedPrefix: [Character] = []
+
     /// 基準を失う直前まで打ち込んでいた内容。
     /// 認識は続いているので、次に届く未確定テキストはこれで始まるはず。
     /// そのときは「続きだけ」を打てば、消さずに、重複もせずに復帰できる
@@ -53,7 +68,10 @@ final class TextInjector {
         accepting = true
         baselineLost = false
         discardCurrentSpan = false
+        unfollowable = false
+        virtualPrefix = 0
         abandonedPrefix = []
+        submittedPrefix = []
         clearPending()
     }
 
@@ -67,7 +85,10 @@ final class TextInjector {
         accepting = false
         baselineLost = false
         discardCurrentSpan = false
+        unfollowable = false
+        virtualPrefix = 0
         abandonedPrefix = []
+        submittedPrefix = []
         clearPending()
     }
 
@@ -80,16 +101,39 @@ final class TextInjector {
     /// 送信は文脈の切れ目なので、次の区間から新しく始めるのが正しい。
     func userSubmitted() {
         guard accepting else { return }
+
+        // **`pending` はもう空になっている。**
+        //
+        // Enter は「利用者が自分で操作した」でもあるので、`userTookOver()` が先に走り、
+        // 打ち込み済みの内容は `abandonedPrefix` へ退避されている。
+        // それを知らずに `pending`（＝空）を送信済みと見なすと、
+        // 「何も打っていない」ことになり、次に届く未確定テキスト（その区間の全文）が
+        // **丸ごと、空になった入力欄へ打ち直される。**
+        // 送信した文章がそっくり次のメッセージに現れる形で実際に起きた。
+        let typed = baselineLost ? abandonedPrefix : pending
+
+        // 送信し終えた文はもう相手の手元にある。こちらは「打ち込み済み」として覚えておき、
+        // ここから先に伸びた分だけを、空になった入力欄へ打つ。
+        //
+        // 短くなる方向へは更新しない。空行を入れようと Enter を2回叩くと、
+        // 2回目は「何も打っていない」状態で来る。それに合わせて忘れてしまうと、
+        // 1回目に送った分をもう一度打ち直すことになる
+        if typed.count >= submittedPrefix.count { submittedPrefix = typed }
+        Log.write("injector: 送信（打ち込み済み \(submittedPrefix.count) 文字）")
         clearPending()
         abandonedPrefix = []
         baselineLost = false
         discardCurrentSpan = true
+        unfollowable = false
     }
 
     /// 未確定テキストの更新。頻度制限をかけて適用する
     func updateVolatile(_ text: String) {
-        guard accepting, !discardCurrentSpan else { return }
+        guard accepting else { return }
+        if unfollowable { return }
+        if discardCurrentSpan, !tryResumeAfterSubmit(with: text) { return }
         if baselineLost, !tryRecover(with: text) { return }
+        guard canFollow(text) else { stopFollowingSpan(); return }
         queued = text
         scheduleFlush()
     }
@@ -115,6 +159,42 @@ final class TextInjector {
         return true
     }
 
+    /// 送信したあとに、そのまま喋り続けたか確かめる。
+    ///
+    /// 送信すると区間を切り直すが、切れ目の確定が届くまで数秒かかることがある。
+    /// その間ずっと捨てていると、続きを喋っているのに何も出てこない。
+    /// 「固まった」と感じるのはこれで、実際にログでも空行を入れた直後に起きていた。
+    ///
+    /// 送信までに打ってあった内容で始まっていれば、そこから伸びた分は
+    /// **送信後に喋った分**なので、打ってよい。
+    /// 直後に続く句読点だけは、送信し終えた文の名残なので捨てる。
+    /// 空の入力欄に句点だけが落ちる、という形で実際に起きた
+    private func tryResumeAfterSubmit(with text: String) -> Bool {
+        let next = Array(text)
+        guard next.count > submittedPrefix.count,
+              Array(next[0..<submittedPrefix.count]) == submittedPrefix
+        else {
+            return false
+        }
+
+        var head = submittedPrefix.count
+        while head < next.count, TextInjector.isLeftover(next[head]) { head += 1 }
+        guard head < next.count else { return false }
+
+        // ここまでは打ち込み済みということにする。差分を取れば、続きだけが打たれる
+        pending = Array(next[0..<head])
+        virtualPrefix = head
+        submittedPrefix = []
+        discardCurrentSpan = false
+        Log.write("injector: 送信のあとも喋り続けているので打ち込みを再開する（送信済み \(head) 文字）")
+        return true
+    }
+
+    /// 送信し終えた文の名残。空になった入力欄へ落ちてほしくないもの
+    private static func isLeftover(_ character: Character) -> Bool {
+        "。、．，!?！？ 　\n".contains(character)
+    }
+
     /// 区間の確定。頻度制限を無視して即座に適用し、その区間を締める
     func finalize(_ text: String) {
         guard accepting else { return }
@@ -123,10 +203,13 @@ final class TextInjector {
         flushTimer = nil
         queued = nil
 
-        // 送信で切れた区間はここで締める。中身は打たない
-        if discardCurrentSpan {
+        // 送信で切れた区間、追いかけられなくなった区間は、ここで締める。中身は打たない
+        if discardCurrentSpan || unfollowable {
             discardCurrentSpan = false
+            unfollowable = false
+            submittedPrefix = []
             pending = []
+            virtualPrefix = 0
             return
         }
 
@@ -139,9 +222,36 @@ final class TextInjector {
             return
         }
 
+        guard canFollow(text) else { stopFollowingSpan(); return }
+
         apply(text)
         // 確定した分はもう打ち直さない。次の区間は白紙から始まる
         pending = []
+        virtualPrefix = 0
+    }
+
+    /// この更新を、そのまま差分で当てられるか。
+    ///
+    /// **送信済みの部分が書き直されていたら、当ててはいけない。**
+    /// 認識は後から言い回しを直す。送信したあとにその直しが届くと、
+    /// 食い違った位置まで消して打ち直そうとするが、そこはもう画面に無い。
+    /// 結果として、送信し終えた文章の後半が丸ごと空の入力欄へ打ち込まれる。
+    /// 実際に「送信した文の最後の100文字が入力欄に残る」形で起きた。
+    ///
+    /// 送信済みの文章はもう相手の手元にあり、こちらから直す手立ては無い。
+    /// 直せないものは、追いかけないのが正しい
+    private func canFollow(_ text: String) -> Bool {
+        guard virtualPrefix > 0 else { return true }
+        return commonPrefixLength(pending, Array(text)) >= virtualPrefix
+    }
+
+    /// この区間はもう追えない。次の確定まで何も打たない
+    private func stopFollowingSpan() {
+        Log.write("injector: 送信済みの部分が書き直された → この区間は追いかけない")
+        clearPending()
+        submittedPrefix = []
+        virtualPrefix = 0
+        unfollowable = true
     }
 
     /// 利用者が自分でキーを打った、クリックした、送信した。
@@ -167,6 +277,7 @@ final class TextInjector {
         flushTimer = nil
         queued = nil
         pending = []
+        virtualPrefix = 0
     }
 
     // MARK: - 適用

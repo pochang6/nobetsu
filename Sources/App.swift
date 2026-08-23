@@ -37,12 +37,26 @@ final class Controller: ObservableObject {
     @Published var rightCommandOnly = false {
         didSet { trigger.rightCommandOnly = rightCommandOnly }
     }
+    /// 入力先から離れたら止める。
+    ///
+    /// 既定は有効。始めたことを忘れたまま別のアプリへ移り、
+    /// 独り言が同僚宛の入力欄へ流れ込む事故を防ぐ。
+    /// 一日中つけっぱなしにして、あちこちで喋りたい人は切ってよい
+    @Published var stopsWhenFocusLeaves = true {
+        didSet {
+            Defaults.stopsWhenFocusLeaves = stopsWhenFocusLeaves
+            // 見張り自体は設定に関わらず動かす。
+            // 止めない設定でも、**カーソルが先頭へ戻されたのを直す**ために目は要る
+        }
+    }
 
     private let engine = DictationEngine()
     private let injector = TextInjector()
     private let overlay = OverlayController()
     private let indicator = IndicatorController()
     private let trigger = TriggerMonitor()
+    private let focusWatcher = FocusWatcher()
+    private let phrases = PhraseBook.shared
 
     private var permissionPoll: Timer?
     /// 許可の要求は一度きり。繰り返し呼んでもダイアログは出ないので無駄打ちしない
@@ -56,20 +70,37 @@ final class Controller: ObservableObject {
     /// この収録で確定した分。表示窓のためだけに持つ
     private var committed = ""
 
+    /// 自動で止まった理由。次に始めるまでメニューに残す
+    private var autoStopReason: String?
+
     private init() {
         engine.delegate = self
         showsTranscript = Defaults.showsTranscript
         showsIndicator = Defaults.showsIndicator
+        stopsWhenFocusLeaves = Defaults.stopsWhenFocusLeaves
         soundEnabled = Sounds.enabled
         engine.useFarField = useFarField
         engine.levelHandler = { [weak self] level in
             self?.indicator.update(level: level)
         }
-        injector.didInject = { [weak self] in self?.indicator.keepCursorVisibleIfHovered() }
+        injector.didInject = { [weak self] in self?.indicator.didInjectText() }
         indicator.onPause = { [weak self] in self?.pause() }
         indicator.onResume = { [weak self] in self?.start() }
         indicator.onClose = { [weak self] in self?.stop() }
         indicator.menuProvider = { [weak self] in self?.buildIndicatorMenu() ?? NSMenu() }
+        focusWatcher.onLeave = { [weak self] reason in
+            guard let self else { return }
+            guard self.stopsWhenFocusLeaves else {
+                // 止めない設定。打ち込み位置の基準だけ捨てて、新しい入力先を見張り直す。
+                // 見張りを降ろしてしまうと、戻ってきたときにカーソルの面倒を見る者がいなくなる
+                Log.write("focus: \(reason)（止めない設定なので続ける）")
+                self.injector.userTookOver()
+                self.focusWatcher.retarget()
+                return
+            }
+            self.stopBecauseFocusLeft(reason)
+        }
+        focusWatcher.onMovedWithinApp = { [weak self] in self?.injector.userTookOver() }
     }
 
     // MARK: - 起動
@@ -190,7 +221,11 @@ final class Controller: ObservableObject {
         }
 
         committed = ""
+        autoStopReason = nil
+        // 辞書は「喋りはじめる瞬間」に読む。書き換えたら、次のひと言から効く
+        phrases.reloadIfNeeded()
         injector.beginSession()
+        focusWatcher.start()
         engine.start()
     }
 
@@ -199,10 +234,13 @@ final class Controller: ObservableObject {
     private func buildIndicatorMenu() -> NSMenu {
         let menu = NSMenu()
 
-        menu.addItem(withTitle: "閉じる", action: #selector(menuStop), keyEquivalent: "")
-            .target = self
-
-        menu.addItem(.separator())
+        // 設定が先、やめる操作は最後。
+        //
+        // 以前はここの先頭に「閉じる」を置いていたが、
+        // **このメニューを閉じるボタンだと読まれて、音声入力ごと止まって驚かせた。**
+        // メニュー自体は ESC やメニューの外を押せば閉じる（macOS の作法）ので、
+        // そのための項目は要らない。
+        // 何が起きるかを言い切る文言にして、位置も下（終了操作の定位置）へ移した
 
         let sound = menu.addItem(withTitle: "開始と終了を音で知らせる",
                                  action: #selector(menuToggleSound), keyEquivalent: "")
@@ -214,11 +252,28 @@ final class Controller: ObservableObject {
         transcript.target = self
         transcript.state = showsTranscript ? .on : .off
 
+        let focus = menu.addItem(withTitle: "入力先から離れたら止める",
+                                 action: #selector(menuToggleFocusStop), keyEquivalent: "")
+        focus.target = self
+        focus.state = stopsWhenFocusLeaves ? .on : .off
+
         menu.addItem(.separator())
+
+        menu.addItem(withTitle: "辞書を編集する",
+                     action: #selector(menuEditDictionary), keyEquivalent: "")
+            .target = self
 
         menu.addItem(withTitle: "この目印の位置を初期状態に戻す",
                      action: #selector(menuResetPosition), keyEquivalent: "")
             .target = self
+
+        menu.addItem(.separator())
+
+        let stopItem = menu.addItem(withTitle: "音声入力を止める（ESC）",
+                                    action: #selector(menuStop), keyEquivalent: "")
+        stopItem.target = self
+        stopItem.image = NSImage(systemSymbolName: "stop.fill",
+                                 accessibilityDescription: "音声入力を止める")
 
         return menu
     }
@@ -226,12 +281,36 @@ final class Controller: ObservableObject {
     @objc private func menuStop() { stop() }
     @objc private func menuToggleSound() { soundEnabled.toggle() }
     @objc private func menuToggleTranscript() { showsTranscript.toggle() }
+    @objc private func menuToggleFocusStop() { stopsWhenFocusLeaves.toggle() }
+    @objc private func menuEditDictionary() { editDictionary() }
     @objc private func menuResetPosition() { indicator.resetPosition() }
+
+    /// 個人辞書を開く。無ければ書き方の分かる雛形を作ってから開く
+    func editDictionary() {
+        phrases.openPersonalFile()
+    }
+
+    /// 辞書を読み直す。喋りはじめるたびに自動で読むので、普段は使わなくてよい
+    func reloadDictionary() {
+        phrases.reload()
+    }
 
     /// 認識をやめて、目印も閉じる。ESC・⌘・× のときの動き
     func stop() {
         keepIndicatorVisible = false
         halt()
+        indicator.hide()
+    }
+
+    /// 入力先から離れたので、こちらの判断で止めた。
+    ///
+    /// **押していないのに終わる**ので、普段の終了音と同じでは何が起きたのか分からない。
+    /// 音を変えて、止まった理由もメニューに残す
+    private func stopBecauseFocusLeft(_ reason: String) {
+        guard isRunning else { return }
+        autoStopReason = reason
+        keepIndicatorVisible = false
+        halt(auto: true)
         indicator.hide()
     }
 
@@ -243,10 +322,11 @@ final class Controller: ObservableObject {
         indicator.setRunning(false)
     }
 
-    private func halt() {
+    private func halt(auto: Bool = false) {
+        focusWatcher.stop()
         guard isRunning else { return }
         // 止める操作をした「今」鳴らす。後始末を待つと、止めたのに無反応な時間が生まれる
-        Sounds.playStop()
+        if auto { Sounds.playAutoStop() } else { Sounds.playStop() }
         // 先に門を閉じる。停止後に遅れて届く確定結果を打ち込むと二重入力になる
         injector.endSession()
         engine.stop()
@@ -258,29 +338,36 @@ final class Controller: ObservableObject {
 extension Controller: DictationDelegate {
 
     func dictation(didUpdateVolatile text: String) {
-        injector.updateVolatile(text)
+        // 打つ直前に言い換える。表示も同じ文字にしないと、目で見たものと入った文字がずれる
+        let fixed = phrases.apply(to: text)
+        injector.updateVolatile(fixed)
         if showsTranscript {
-            overlay.update(committed: committed, volatile: text, status: status)
+            overlay.update(committed: committed, volatile: fixed, status: status)
         }
     }
 
     func dictation(didFinalize text: String) {
-        injector.finalize(text)
-        committed += text
+        let fixed = phrases.apply(to: text)
+        injector.finalize(fixed)
+        committed += fixed
         if showsTranscript {
             overlay.update(committed: committed, volatile: "", status: status)
         }
     }
 
-    func dictationWillBeginCapturing() {
-        // ここが「これから聞きます」の合図。無線イヤホンの切り替えに飲まれない
+    func dictationDidBeginCapturing() {
+        // ここが「もう聞いています」の合図。この音を聞いてから喋れば、頭は削られない
         Sounds.playStart()
     }
 
     func dictation(didChangeRunning running: Bool, message: String) {
-        let wasRunning = isRunning
         isRunning = running
-        status = message
+        // なぜ止まったのかは、押していない停止のときこそ知りたい
+        if !running, let reason = autoStopReason {
+            status = "\(reason)ので止めました"
+        } else {
+            status = message
+        }
         // 一時停止して目印が残っている間も ESC で閉じられるようにしておく。
         // × を押すしかない状態にすると、キーボードから抜け出せなくなる
         trigger.isRunning = running || keepIndicatorVisible
@@ -313,24 +400,35 @@ enum Defaults {
         get { UserDefaults.standard.bool(forKey: "nobetsu.showsTranscript") }
         set { UserDefaults.standard.set(newValue, forKey: "nobetsu.showsTranscript") }
     }
-    /// 目印を動かした位置。次回も同じところに出す
-    static var indicatorOrigin: NSPoint? {
+    /// 目印を動かした位置。**画面の左下からの距離**で覚える。
+    /// 絶対の座標で覚えると、モニターを繋ぎ替えたときや、
+    /// 前回と違う画面で喋ったときに、見当違いの場所や画面の外へ出てしまう
+    static var indicatorOffset: NSPoint? {
         get {
             let d = UserDefaults.standard
-            guard d.object(forKey: "nobetsu.indicatorX") != nil else { return nil }
-            return NSPoint(x: d.double(forKey: "nobetsu.indicatorX"),
-                           y: d.double(forKey: "nobetsu.indicatorY"))
+            guard d.object(forKey: "nobetsu.indicatorDX") != nil else { return nil }
+            return NSPoint(x: d.double(forKey: "nobetsu.indicatorDX"),
+                           y: d.double(forKey: "nobetsu.indicatorDY"))
         }
         set {
             let d = UserDefaults.standard
             guard let newValue else {
-                d.removeObject(forKey: "nobetsu.indicatorX")
-                d.removeObject(forKey: "nobetsu.indicatorY")
+                d.removeObject(forKey: "nobetsu.indicatorDX")
+                d.removeObject(forKey: "nobetsu.indicatorDY")
                 return
             }
-            d.set(newValue.x, forKey: "nobetsu.indicatorX")
-            d.set(newValue.y, forKey: "nobetsu.indicatorY")
+            d.set(newValue.x, forKey: "nobetsu.indicatorDX")
+            d.set(newValue.y, forKey: "nobetsu.indicatorDY")
         }
+    }
+
+    /// 入力先から離れたら止める。既定は有効（事故を防ぐ側に倒す）
+    static var stopsWhenFocusLeaves: Bool {
+        get {
+            if UserDefaults.standard.object(forKey: "nobetsu.stopsWhenFocusLeaves") == nil { return true }
+            return UserDefaults.standard.bool(forKey: "nobetsu.stopsWhenFocusLeaves")
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "nobetsu.stopsWhenFocusLeaves") }
     }
 
     static var showsIndicator: Bool {
@@ -379,8 +477,14 @@ struct NobetsuApp: App {
             Toggle("左上に認識中の目印を出す", isOn: $controller.showsIndicator)
             Toggle("認識中の文字を画面に流す", isOn: $controller.showsTranscript)
             Toggle("右の ⌘ だけで開始する", isOn: $controller.rightCommandOnly)
+            Toggle("入力先から離れたら止める", isOn: $controller.stopsWhenFocusLeaves)
             Toggle("遠距離マイク補正", isOn: $controller.useFarField)
                 .disabled(controller.isRunning)
+
+            Divider()
+
+            Button("辞書を編集する") { controller.editDictionary() }
+            Button("辞書を読み直す") { controller.reloadDictionary() }
 
             Divider()
 
