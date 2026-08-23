@@ -109,7 +109,7 @@ final class Controller: ObservableObject {
         Log.startSession()
         // アクセシビリティの判定より先に入力監視を扱う。
         // AXIsProcessTrusted() を先に呼ぶと入力監視の要求が通らなくなる既知の不具合がある
-        Log.write("bootstrap: 入力監視 \(Permissions.inputMonitoringStatusText) / 署名 \(Permissions.signingSummary)")
+        Log.write("bootstrap: v\(NobetsuApp.version) / 入力監視 \(Permissions.inputMonitoringStatusText) / 署名 \(Permissions.signingSummary)")
 
         LoginItem.applyDefaultOnFirstLaunch()
         launchAtLogin = LoginItem.isEnabled
@@ -488,10 +488,19 @@ struct NobetsuApp: App {
 
             Divider()
 
+            // 利用者がバージョンを確かめられる唯一の場所。
+            // 不具合の報告をもらうときに「どれを使っているか」が分からないと話が始まらない
+            Text("nobetsu \(NobetsuApp.version)")
+
             Button("nobetsu を終了") { NSApp.terminate(nil) }
         } label: {
             Image(systemName: iconName)
         }
+    }
+
+    /// Info.plist に焼き込まれた値。元は VERSION ファイル1枚
+    static var version: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
     }
 
     private var iconName: String {

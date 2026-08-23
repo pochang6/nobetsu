@@ -83,6 +83,22 @@ nobetsu を OSS として出すまでの手順と、そのときに決めてお�
 
 ## 5. 公開の瞬間の作法
 
+- [ ] **タグと Release を作る。** バージョンの正はここ。README に数字を直書きしないこと（腐る）
+
+      ```bash
+      git tag -a v1.0.0 -m "v1.0.0"
+      git push origin v1.0.0
+      gh release create v1.0.0 --title "v1.0.0" --notes "..."
+      ```
+
+- [ ] Release を作ったあとなら、README の頭にバッジを置いてもよい（自動で最新を拾うので腐らない）
+
+      ```markdown
+      ![](https://img.shields.io/github/v/release/pochang6/nobetsu)
+      ![](https://img.shields.io/badge/macOS-26%2B-black)
+      ![](https://img.shields.io/github/license/pochang6/nobetsu)
+      ```
+
 - [ ] Description と Topics（`macos` `dictation` `japanese` `speech-recognition` `swift` `accessibility`）
 - [ ] **Releases に .app を置くかどうか。**
       署名と公証（Notarization）が無いと Gatekeeper に止められ、
