@@ -6,13 +6,16 @@
 
 - 喋っている途中で**固まる**。変換が追いつかなくなる
 - AI エージェントのマイクは**数分で切れる**。長文を一息で入れられない
-- 「押す → 喋る → 離す → 一括ペースト」型ばかりで、**喋っている間、文字が見えない**
+- **キーを押している間しか喋れない。**離した瞬間に終わり、文字はまとめて貼りつく
 
-nobetsu は ⌘ を長押しして喋るだけです。話した端から、そのとき使っているアプリに文字が入ります。
-時間制限はありません。日本語入力（IME）を経由しません。
-すべて端末内で完結し、音声も文字も外部に送信しません。
+nobetsu は **⌘ を 0.5 秒押して、離します。それだけです。**
+あとは指をどこにも置かずに、好きなだけ喋り続けられます。**押しっぱなしにする必要はありません。**
+止めるときに、もう一度 ⌘ を軽く叩くか ESC を押します。
 
-![⌘ を長押しして喋ると、話した端から、使っているアプリに文字が入っていく](docs/demo.gif)
+話した端から、そのとき使っているアプリに文字が入ります。時間制限はありません。
+日本語入力（IME）を経由しません。すべて端末内で完結し、音声も文字も外部に送信しません。
+
+![⌘ を 0.5 秒押して離すと、あとは喋った端から、使っているアプリに文字が入っていく](docs/demo.gif)
 
 [全編を見る（26秒）](docs/nobetsu-demo.mp4)
 
@@ -318,8 +321,11 @@ MIT — [LICENSE](LICENSE)
 
 **nobetsu** — dictation for Japanese speakers who want to keep talking, and talking.
 
-Hold ⌘ and speak. Text lands directly in whatever app you are using, as you speak.
-No time limit. Everything runs on your Mac; no audio or text leaves the device.
+**Press ⌘ for half a second and let go.** That is it — you can then keep talking for as
+long as you like, hands free. **It is not push-to-talk.** Tap ⌘ again, or press ESC, to stop.
+
+Text lands directly in whatever app you are using, as you speak. No time limit.
+Everything runs on your Mac; no audio or text leaves the device.
 
 *Nobetsu maku nashi* (のべつ幕なし) is a Japanese phrase meaning "without ever lowering
 the curtain" — going on and on without pause.
@@ -353,7 +359,6 @@ cd nobetsu
 open /Applications/nobetsu.app
 ```
 
-Hold ⌘ for half a second to start. Tap ⌘ again, or press ESC, to stop.
 macOS will ask for Input Monitoring and Accessibility the first time each is needed.
 
 The UI is Japanese only. The recognizer is Japanese only. This is deliberate —
