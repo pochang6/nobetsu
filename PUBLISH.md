@@ -24,11 +24,11 @@ nobetsu を OSS として出すまでの手順と、そのときに決めてお�
 
 作業:
 
-- [ ] いまの `dictionary.txt` から、一般的な語彙だけを抜いて `dictionary.sample.txt` を作る
+- [x] いまの `dictionary.txt` から、一般的な語彙だけを抜いて `dictionary.sample.txt` を作った
 - [ ] 個人の分は `~/Library/Application Support/nobetsu/dictionary.txt` へ実体として移す
       （いまはリポジトリ内のファイルへのシンボリックリンクになっている）
-- [ ] `build.sh` が焼き込む対象を `dictionary.sample.txt` に変える
-- [ ] `.claude/skills/dictionary/` の書き込み先も合わせて直す
+- [x] `build.sh` は `dictionary.txt` があればそれを、無ければ見本を焼き込む
+- [x] `.claude/skills/dictionary/` の書き込み先も合わせて直した
 
 **git の履歴にも残さないこと。**
 幸い `dictionary.txt` は一度もコミットされていないので、履歴の書き換えは要りません。

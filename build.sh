@@ -51,9 +51,13 @@ swiftc \
 # 辞書はアプリの中へ焼き込む。
 # git で管理されるので、複数の Mac で同じ辞書を共有できる。
 # その Mac だけの調整は ~/Library/Application Support/nobetsu/dictionary.txt へ書く
-if [ -f dictionary.txt ]; then
-  cp dictionary.txt "$APP/Contents/Resources/dictionary.txt"
-  echo "==> dictionary: $(grep -cE '^[^#]*(=>|→)' dictionary.txt) 件"
+# 自分用の dictionary.txt があればそれを、無ければ見本を焼き込む。
+# dictionary.txt は .gitignore してある（辞書には仕事の固有名詞が溜まるため）
+DICT="dictionary.sample.txt"
+[ -f dictionary.txt ] && DICT="dictionary.txt"
+if [ -f "$DICT" ]; then
+  cp "$DICT" "$APP/Contents/Resources/dictionary.txt"
+  echo "==> dictionary: $(grep -cE '^[^#]*(=>|→)' "$DICT") 件 ($DICT)"
 fi
 
 # macOS の許可（アクセシビリティ / 入力監視）は、署名の同一性に紐づいて記録される。

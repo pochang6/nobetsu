@@ -87,7 +87,9 @@ description: nobetsu の辞書を育てる。音声入力の誤変換を前後�
 
 ## 書き込み先
 
-`dictionary.txt`（リポジトリ）**1枚だけ**を触ります。
+`dictionary.txt`（リポジトリ直下）**1枚だけ**を触ります。
+このファイルは `.gitignore` されています（公開リポジトリに個人の語彙を出さないため）。
+見本の `dictionary.sample.txt` は触りません。
 
 `~/Library/Application Support/nobetsu/dictionary.txt` はこのファイルへの
 シンボリックリンクなので、**書いた瞬間から効きます。ビルドは要りません**
