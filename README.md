@@ -18,6 +18,8 @@ nobetsu は ⌘ を長押しして喋るだけです。話した端から、そ�
 
 > **のべつ幕なし** — 芝居で幕を下ろさずに演じ続けること。転じて、絶え間なく続くこと。
 
+*English speakers: see [English](#english) below for what this is and why it exists.*
+
 ---
 
 ## なぜ日本語だけ、こうなるのか
@@ -299,6 +301,19 @@ MIT ライセンスのとおり**無保証**で、使ったことで何かが起
 
 ---
 
+## ライセンス
+
+MIT — [LICENSE](LICENSE)
+
+音声認識には Apple の `SpeechAnalyzer` / `DictationTranscriber` を使っています。
+モデル本体は OS が管理する Apple の資産であり、このリポジトリには含まれません。
+
+## 作った人
+
+**ぽちょ研究所 / Pochang Lab** — [@pochang6](https://github.com/pochang6)
+
+---
+
 ## English
 
 **nobetsu** — dictation for Japanese speakers who want to keep talking, and talking.
@@ -341,20 +356,23 @@ open /Applications/nobetsu.app
 Hold ⌘ for half a second to start. Tap ⌘ again, or press ESC, to stop.
 macOS will ask for Input Monitoring and Accessibility the first time each is needed.
 
-The UI is Japanese only. The recognizer is Japanese only. This is deliberate.
+The UI is Japanese only. The recognizer is Japanese only. This is deliberate —
+the problem it solves does not exist outside Japanese.
 
-Provided as is, without warranty of any kind. Issues and pull requests are welcome,
-but responses are not guaranteed.
+### License
 
----
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 pochang6.
 
-## ライセンス
+Speech recognition uses Apple's `SpeechAnalyzer` / `DictationTranscriber`.
+The models belong to the OS and are not part of this repository.
 
-MIT — [LICENSE](LICENSE)
+### Disclaimer
 
-音声認識には Apple の `SpeechAnalyzer` / `DictationTranscriber` を使っています。
-モデル本体は OS が管理する Apple の資産であり、このリポジトリには含まれません。
+**This is a hobby project, published as is.** As stated in the MIT license, it comes
+with **no warranty of any kind**, and I cannot take responsibility for what happens
+when you use it.
 
-## 作った人
-
-**ぽちょ研究所 / Pochang Lab** — [@pochang6](https://github.com/pochang6)
+- It sends synthetic key events to other applications. **Text may land somewhere you did not intend.**
+- Bug reports are welcome, but **a response is not guaranteed**.
+- Pull requests are welcome, but may be declined if they do not fit the direction of the project.
+- Try it in your own environment before relying on it for anything that matters.
