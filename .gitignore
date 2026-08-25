@@ -11,3 +11,8 @@ CLAUDE.local.md
 # 誤変換を拾って育てる仕組みなので、中身は仕事の固有名詞やその日考えていたことの記録に近い。
 # 公開用のテンプレートは dictionary.sample.txt（PUBLISH.md 参照）
 /dictionary.txt
+
+# 手元だけの覚書。**追跡しない。**
+# まだ形になっていないもの（試している最中・push していないもの）の置き場です。
+# 落ち着いたら TODO.md / PUBLISH.md へ移します。
+/.local/

@@ -304,7 +304,7 @@ private struct IndicatorView: View {
                 iconButton("mic.fill", help: "再開", tint: .accentColor, action: onResume)
             }
             iconButton("ellipsis", help: "設定", action: onMenu)
-            iconButton("xmark", help: "閉じる（ESC、⌘ の長押しでも閉じます）", action: onClose)
+            iconButton("xmark", help: "閉じる（ESC、⌘ の単独タップでも閉じます）", action: onClose)
         }
         .padding(.horizontal, 13)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)

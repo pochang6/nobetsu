@@ -1,13 +1,13 @@
 import Foundation
+import Compression
 
 /// nobetsu の、副作用を持たない部分を確かめる。
 ///
 /// 走らせ方は `./test.sh`。
 ///
-/// ここで見るのは「辞書の置換」「打ち込みの差分計算」「許可が無いときの案内」の3つです。
-/// 前の2つは**間違えると利用者の文章を壊す**場所、最後の1つは
-/// **間違えると利用者が二度と使いはじめられない**場所で、
-/// どれも入力と出力だけで完結しているので、機械で確かめられます。
+/// ここで見るのは、辞書の置換、打ち込みの差分計算、許可が無いときの案内、
+/// 開始キーの設定、ログの圧縮です。間違えると利用者の文章・起動手順・
+/// 過去の記録を壊す場所で、入力と出力だけで完結するため機械で確かめられます。
 ///
 /// 逆に、マイク・イベントタップ・他アプリへの打ち込みは実機でしか確かめられません。
 /// そちらは `.claude/skills/rebuild/` の手順で、実際に動かして見ています。
@@ -24,6 +24,8 @@ struct Tests {
         diff()
         follow()
         advice()
+        triggerSettings()
+        archive()
 
         print("")
         if failures == 0 {
@@ -231,5 +233,103 @@ struct Tests {
                                   adhoc: false, appPath: path)
         expectContains("許可のせいではないと言う", [a.title], "許可は付いていますが")
         expectContains("起動し直せと言う", a.lines, "起動し直す")
+    }
+
+    // MARK: - ログの退避（gzip）
+
+    // MARK: - 開始キー
+
+    static func triggerSettings() {
+        expect("左だけなら左⌘を受ける", CommandKeyChoice.left.accepts(keyCode: 55), true)
+        expect("左だけなら右⌘を受けない", CommandKeyChoice.left.accepts(keyCode: 54), false)
+        expect("右だけなら右⌘を受ける", CommandKeyChoice.right.accepts(keyCode: 54), true)
+        expect("左右なら左⌘を受ける", CommandKeyChoice.both.accepts(keyCode: 55), true)
+        expect("左右なら右⌘を受ける", CommandKeyChoice.both.accepts(keyCode: 54), true)
+        expect("⌘以外は受けない", CommandKeyChoice.both.accepts(keyCode: 8), false)
+
+        expect("長押しは0.1秒刻みに丸める",
+               Int(TriggerSettings.normalizedHoldThreshold(0.84) * 10), 8)
+        expect("長押しの下限",
+               Int(TriggerSettings.normalizedHoldThreshold(0.1) * 10), 5)
+        expect("長押しの上限",
+               Int(TriggerSettings.normalizedHoldThreshold(9.0) * 10), 20)
+        expect("長押しの既定は1秒",
+               Int(TriggerSettings.defaultHoldThreshold * 10), 10)
+    }
+
+    /// ログは追記しかしないので、放っておくと際限なく育つ。
+    /// 1MB で圧縮して退避するようにしたが、**圧縮が壊れていても普段は誰も気づかない**。
+    /// 気づくのは半年後、いざ古い記録を読もうとして開けなかったときになる。
+    /// gzip の形（ヘッダ・CRC32・元の長さ）は入力と出力だけで決まるので、ここで確かめておく。
+    static func archive() {
+        expect("退避先の名前", Log.archiveName("nobetsu.log", 1, compressed: true), "nobetsu.log.1.gz")
+        expect("圧縮できなかったときは .gz を付けない",
+               Log.archiveName("nobetsu.log", 3, compressed: false), "nobetsu.log.3")
+
+        // CRC32 の答え合わせ。"123456789" が 0xCBF43926 になるのは規格が決めた検算値で、
+        // ここがずれていると gunzip は最後の最後で「壊れている」と言って捨てる
+        expect("CRC32 の検算値",
+               String(format: "%08X", Log.crc32(Data("123456789".utf8))), "CBF43926")
+
+        let line = "[00:00:00.000] focus: 入力先を見張る（Claude）\n"
+        let sample = Data(String(repeating: line, count: 400).utf8)
+        guard let packed = Log.gzipped(sample, mtime: 0) else {
+            count += 1
+            failures += 1
+            print("❌ gzip に包めなかった")
+            return
+        }
+
+        expect("gzip の魔法の2バイト", String(format: "%02X%02X", packed[0], packed[1]), "1F8B")
+        expect("中身は DEFLATE", String(format: "%02X", packed[2]), "08")
+        expect("ログは1割以下に縮む", packed.count < sample.count / 10, true)
+
+        // 末尾4バイトは元の長さ。gunzip はここで長さを照合する
+        let size = packed.suffix(4).reversed().reduce(0) { $0 << 8 | Int($1) }
+        expect("末尾に元の長さが入る", size, sample.count)
+
+        // その手前の4バイトは CRC32
+        let crc = packed.dropLast(4).suffix(4).reversed().reduce(UInt32(0)) { $0 << 8 | UInt32($1) }
+        expect("末尾に CRC32 が入る",
+               String(format: "%08X", crc), String(format: "%08X", Log.crc32(sample)))
+
+        // ヘッダ10バイトと末尾8バイトを外すと、生の DEFLATE が残るはず。
+        // 戻して元と同じなら、gunzip も同じように戻せる
+        let body = Data(packed.dropFirst(10).dropLast(8))
+        expect("包みを解くと元に戻る", inflate(body, into: sample.count) == sample, true)
+
+        expect("空でも壊れた形にはしない", (Log.gzipped(Data())?.count ?? 0) > 0, true)
+        expect("標準の gzip が読める", gzipAccepts(packed), true)
+    }
+
+    /// 同じ Compression API で戻せるだけでは、gzip 互換とは言い切れない。
+    /// macOS 標準の gzip 自身にも形式を検査してもらう。
+    static func gzipAccepts(_ data: Data) -> Bool {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nobetsu-log-test-\(UUID().uuidString).gz")
+        defer { try? FileManager.default.removeItem(at: url) }
+        do {
+            try data.write(to: url)
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/gzip")
+            process.arguments = ["-t", url.path]
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
+    /// テストのためだけの解凍。アプリ本体は圧縮しかしないので、こちらに置く
+    static func inflate(_ data: Data, into capacity: Int) -> Data? {
+        data.withUnsafeBytes { raw -> Data? in
+            guard let src = raw.bindMemory(to: UInt8.self).baseAddress else { return nil }
+            let dst = UnsafeMutablePointer<UInt8>.allocate(capacity: capacity + 1)
+            defer { dst.deallocate() }
+            let n = compression_decode_buffer(dst, capacity + 1, src, data.count, nil, COMPRESSION_ZLIB)
+            guard n > 0 else { return nil }
+            return Data(bytes: dst, count: n)
+        }
     }
 }

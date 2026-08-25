@@ -66,10 +66,10 @@ is_adhoc() {
 # ビルドせずに署名の可否だけ見る。rebuild スキルが最初に叩く
 if [ "${1:-}" = "--check" ]; then
   if can_sign_with_identity; then
-    echo "✅ 証明書「$IDENTITY」で署名できます。許可はやり直しになりません"
+    echo "✅ 証明書「${IDENTITY}」で署名できます。許可はやり直しになりません"
     exit 0
   fi
-  echo "❌ 証明書「$IDENTITY」で署名できません。このままビルドしても許可が下りません"
+  echo "❌ 証明書「${IDENTITY}」で署名できません。このままビルドしても許可が下りません"
   echo "   codesign の言い分: ${SIGN_PROBE_ERROR:-（なし）}"
   echo
   certificate_help
@@ -82,7 +82,7 @@ if can_sign_with_identity; then
 else
   SIGNABLE=0
   if [ "$ALLOW_ADHOC" != "1" ]; then
-    echo "✋ 中止しました: 証明書「$IDENTITY」で署名できません" >&2
+    echo "✋ 中止しました: 証明書「${IDENTITY}」で署名できません" >&2
     echo "   codesign の言い分: ${SIGN_PROBE_ERROR:-（なし）}" >&2
     echo >&2
     echo "  このままビルドするとアドホック署名になり、macOS の入力監視が" >&2
@@ -155,7 +155,7 @@ if [ "$SIGNABLE" = "1" ]; then
   codesign --force --sign "$IDENTITY" --timestamp=none "$APP"
   # 署名できたはずが adhoc になっていたら、設置しても動かない。ここで止める
   if is_adhoc "$APP"; then
-    echo "✋ 中止しました: 署名が adhoc になっています（証明書「$IDENTITY」を確かめてください）" >&2
+    echo "✋ 中止しました: 署名が adhoc になっています（証明書「${IDENTITY}」を確かめてください）" >&2
     echo "   ビルドしたものは $APP に残してあります（設置はしていません）" >&2
     exit 1
   fi
@@ -181,7 +181,7 @@ if [ "$SIGNABLE" = "1" ]; then
   echo "起動するには: open \"$INSTALLED\""
 else
   echo "⚠️  アドホック署名です。入力監視の許可は下りないため、⌘ の長押しには反応しません。"
-  echo "   実際に使うには、証明書「$IDENTITY」を作って ./build.sh をやり直してください。"
+  echo "   実際に使うには、証明書「${IDENTITY}」を作って ./build.sh をやり直してください。"
   echo
   certificate_help
 fi

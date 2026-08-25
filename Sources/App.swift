@@ -39,9 +39,20 @@ final class Controller: ObservableObject {
     @Published var launchAtLogin = false {
         didSet { LoginItem.setEnabled(launchAtLogin) }
     }
-    /// ⌘ の誤発火が気になるとき用の逃げ道。右⌘ だけを開始キーにする
-    @Published var rightCommandOnly = false {
-        didSet { trigger.rightCommandOnly = rightCommandOnly }
+    /// ⌘ を長押しして開始するまでの時間。コピーや貼り付けで迷ったときの誤発火を防ぐ。
+    @Published var holdThreshold = TriggerSettings.defaultHoldThreshold {
+        didSet {
+            let normalized = TriggerSettings.normalizedHoldThreshold(holdThreshold)
+            trigger.holdThreshold = normalized
+            Defaults.holdThreshold = normalized
+        }
+    }
+    /// 開始に使う ⌘。停止の単独タップは左右どちらでも受ける。
+    @Published var commandKeyChoice: CommandKeyChoice = .both {
+        didSet {
+            trigger.commandKeyChoice = commandKeyChoice
+            Defaults.commandKeyChoice = commandKeyChoice
+        }
     }
     /// 入力先から離れたら止める。
     ///
@@ -84,7 +95,11 @@ final class Controller: ObservableObject {
         showsTranscript = Defaults.showsTranscript
         showsIndicator = Defaults.showsIndicator
         stopsWhenFocusLeaves = Defaults.stopsWhenFocusLeaves
+        holdThreshold = Defaults.holdThreshold
+        commandKeyChoice = Defaults.commandKeyChoice
         soundEnabled = Sounds.enabled
+        trigger.holdThreshold = holdThreshold
+        trigger.commandKeyChoice = commandKeyChoice
         engine.useFarField = useFarField
         engine.levelHandler = { [weak self] level in
             self?.indicator.update(level: level)
@@ -128,7 +143,9 @@ final class Controller: ObservableObject {
             self.injector.userSubmitted()
             self.engine.cutSpan()
         }
-        trigger.rightCommandOnly = rightCommandOnly
+        trigger.holdThreshold = holdThreshold
+        trigger.commandKeyChoice = commandKeyChoice
+        Log.write("trigger: 開始設定 長押し=\(String(format: "%.1f", holdThreshold))秒 / ⌘=\(commandKeyChoice.title)")
 
         if activateTrigger() { return }
         requestPermissions()
@@ -276,6 +293,27 @@ final class Controller: ObservableObject {
 
         menu.addItem(.separator())
 
+        let threshold = NSMenuItem()
+        let thresholdView = NSHostingView(rootView: HoldThresholdMenuView(controller: self))
+        thresholdView.frame = NSRect(x: 0, y: 0, width: 250, height: 54)
+        threshold.view = thresholdView
+        menu.addItem(threshold)
+
+        let command = NSMenuItem(title: "開始に使う ⌘", action: nil, keyEquivalent: "")
+        let commandMenu = NSMenu()
+        for choice in CommandKeyChoice.allCases {
+            let item = commandMenu.addItem(withTitle: choice.title,
+                                           action: #selector(menuSelectCommandKey(_:)),
+                                           keyEquivalent: "")
+            item.target = self
+            item.representedObject = choice.rawValue
+            item.state = commandKeyChoice == choice ? .on : .off
+        }
+        menu.addItem(command)
+        menu.setSubmenu(commandMenu, for: command)
+
+        menu.addItem(.separator())
+
         menu.addItem(withTitle: "辞書を編集する",
                      action: #selector(menuEditDictionary), keyEquivalent: "")
             .target = self
@@ -299,6 +337,11 @@ final class Controller: ObservableObject {
     @objc private func menuToggleSound() { soundEnabled.toggle() }
     @objc private func menuToggleTranscript() { showsTranscript.toggle() }
     @objc private func menuToggleFocusStop() { stopsWhenFocusLeaves.toggle() }
+    @objc private func menuSelectCommandKey(_ sender: NSMenuItem) {
+        guard let rawValue = sender.representedObject as? String,
+              let choice = CommandKeyChoice(rawValue: rawValue) else { return }
+        commandKeyChoice = choice
+    }
     @objc private func menuEditDictionary() { editDictionary() }
     @objc private func menuResetPosition() { indicator.resetPosition() }
 
@@ -455,6 +498,50 @@ enum Defaults {
         }
         set { UserDefaults.standard.set(newValue, forKey: "nobetsu.showsIndicator") }
     }
+
+    /// 既存利用者も、更新後は安全側の新しい既定 1.0 秒から始める。
+    static var holdThreshold: TimeInterval {
+        get {
+            let defaults = UserDefaults.standard
+            guard defaults.object(forKey: "nobetsu.holdThreshold") != nil else {
+                return TriggerSettings.defaultHoldThreshold
+            }
+            return TriggerSettings.normalizedHoldThreshold(
+                defaults.double(forKey: "nobetsu.holdThreshold")
+            )
+        }
+        set {
+            UserDefaults.standard.set(TriggerSettings.normalizedHoldThreshold(newValue),
+                                      forKey: "nobetsu.holdThreshold")
+        }
+    }
+
+    static var commandKeyChoice: CommandKeyChoice {
+        get {
+            guard let rawValue = UserDefaults.standard.string(forKey: "nobetsu.commandKeyChoice") else {
+                return .both
+            }
+            return CommandKeyChoice(rawValue: rawValue) ?? .both
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "nobetsu.commandKeyChoice") }
+    }
+}
+
+/// 認識中の目印にある「…」からも、長押し時間をその場で変えられる。
+private struct HoldThresholdMenuView: View {
+    @ObservedObject var controller: Controller
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("開始までの長押し: \(controller.holdThreshold, specifier: "%.1f") 秒")
+            Slider(value: $controller.holdThreshold,
+                   in: TriggerSettings.minimumHoldThreshold...TriggerSettings.maximumHoldThreshold,
+                   step: TriggerSettings.holdThresholdStep)
+                .accessibilityLabel("開始までの長押し時間")
+        }
+        .padding(.horizontal, 12)
+        .frame(width: 250, height: 54)
+    }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -511,7 +598,21 @@ struct NobetsuApp: App {
             Toggle("開始と終了を音で知らせる", isOn: $controller.soundEnabled)
             Toggle("左上に認識中の目印を出す", isOn: $controller.showsIndicator)
             Toggle("認識中の文字を画面に流す", isOn: $controller.showsTranscript)
-            Toggle("右の ⌘ だけで開始する", isOn: $controller.rightCommandOnly)
+
+            Picker("開始までの長押し: \(controller.holdThreshold, specifier: "%.1f") 秒",
+                   selection: $controller.holdThreshold) {
+                ForEach(5...20, id: \.self) { tenths in
+                    Text("\(Double(tenths) / 10, specifier: "%.1f") 秒")
+                        .tag(Double(tenths) / 10)
+                }
+            }
+            .pickerStyle(.menu)
+            Picker("開始に使う ⌘", selection: $controller.commandKeyChoice) {
+                ForEach(CommandKeyChoice.allCases) { choice in
+                    Text(choice.title).tag(choice)
+                }
+            }
+            .pickerStyle(.menu)
             Toggle("入力先から離れたら止める", isOn: $controller.stopsWhenFocusLeaves)
             Toggle("遠距離マイク補正", isOn: $controller.useFarField)
                 .disabled(controller.isRunning)

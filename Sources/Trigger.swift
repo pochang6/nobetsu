@@ -2,6 +2,44 @@ import Foundation
 import AppKit
 import CoreGraphics
 
+/// 音声入力を始める ⌘ キー。停止はこれまでどおり、左右どちらの単独タップでもできる。
+enum CommandKeyChoice: String, CaseIterable, Identifiable {
+    case both
+    case left
+    case right
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .both: return "左右どちらでも"
+        case .left: return "左だけ"
+        case .right: return "右だけ"
+        }
+    }
+
+    func accepts(keyCode: Int64) -> Bool {
+        switch self {
+        case .both: return keyCode == 55 || keyCode == 54
+        case .left: return keyCode == 55
+        case .right: return keyCode == 54
+        }
+    }
+}
+
+/// 長押し時間の範囲と丸め方。UI と保存値が同じ約束を使う。
+enum TriggerSettings {
+    static let defaultHoldThreshold: TimeInterval = 1.0
+    static let minimumHoldThreshold: TimeInterval = 0.5
+    static let maximumHoldThreshold: TimeInterval = 2.0
+    static let holdThresholdStep: TimeInterval = 0.1
+
+    static func normalizedHoldThreshold(_ value: TimeInterval) -> TimeInterval {
+        let clamped = min(max(value, minimumHoldThreshold), maximumHoldThreshold)
+        return (clamped / holdThresholdStep).rounded() * holdThresholdStep
+    }
+}
+
 /// キーの見張り番。
 ///
 /// - ⌘ を単独で長押し → 開始
@@ -23,10 +61,10 @@ final class TriggerMonitor {
     nonisolated static let injectedMagic: Int64 = 0x4E_42_54_53  // 'NBTS'
 
     /// 長押しと判定するまでの時間
-    var holdThreshold: TimeInterval = 0.5
+    var holdThreshold: TimeInterval = TriggerSettings.defaultHoldThreshold
 
-    /// 右⌘ だけを開始キーにする。既定は左右どちらでも反応する
-    var rightCommandOnly = false
+    /// 開始に使う ⌘。既定は左右どちらでも反応する
+    var commandKeyChoice: CommandKeyChoice = .both
 
     var onStart: (() -> Void)?
     var onStop: (() -> Void)?
@@ -241,7 +279,7 @@ final class TriggerMonitor {
 
         guard !isRunning else { return }
 
-        if rightCommandOnly && keyCode != TriggerMonitor.keyCommandRight { return }
+        guard commandKeyChoice.accepts(keyCode: keyCode) else { return }
 
         holdTimer?.invalidate()
         holdTimer = Timer.scheduledTimer(withTimeInterval: holdThreshold, repeats: false) { [weak self] _ in
