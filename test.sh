@@ -16,6 +16,7 @@ swiftc \
   -sdk "$SDK" \
   -framework AppKit -framework Carbon \
   Sources/Phrases.swift \
+  Sources/PermissionAdvice.swift \
   Sources/Injector.swift \
   Sources/Trigger.swift \
   Sources/Log.swift \

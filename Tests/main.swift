@@ -4,9 +4,10 @@ import Foundation
 ///
 /// 走らせ方は `./test.sh`。
 ///
-/// ここで見るのは「辞書の置換」と「打ち込みの差分計算」の2つだけです。
-/// どちらも**間違えると利用者の文章を壊す**場所で、しかも入力と出力だけで
-/// 完結しているので、機械で確かめられます。
+/// ここで見るのは「辞書の置換」「打ち込みの差分計算」「許可が無いときの案内」の3つです。
+/// 前の2つは**間違えると利用者の文章を壊す**場所、最後の1つは
+/// **間違えると利用者が二度と使いはじめられない**場所で、
+/// どれも入力と出力だけで完結しているので、機械で確かめられます。
 ///
 /// 逆に、マイク・イベントタップ・他アプリへの打ち込みは実機でしか確かめられません。
 /// そちらは `.claude/skills/rebuild/` の手順で、実際に動かして見ています。
@@ -22,6 +23,7 @@ struct Tests {
         apply()
         diff()
         follow()
+        advice()
 
         print("")
         if failures == 0 {
@@ -47,6 +49,14 @@ struct Tests {
 
     static func expect(_ name: String, _ actual: Bool, _ expected: Bool) {
         expect(name, actual ? "true" : "false", expected ? "true" : "false")
+    }
+
+    /// 文言そのものは直すたびに変わるので、**必ず要る言葉が入っているか**だけを見る
+    static func expectContains(_ name: String, _ haystack: [String], _ needle: String) {
+        count += 1
+        guard !haystack.contains(where: { $0.contains(needle) }) else { return }
+        failures += 1
+        print("❌ \(name)\n     「\(needle)」が見当たりません\n     実際: \(haystack)")
     }
 
     // MARK: - 辞書を読む
@@ -179,5 +189,47 @@ struct Tests {
         expect("送信済みの部分が書き直されたら、追いかけない",
                TextInjector.canFollow(pending: Array("送信した。続き"), next: Array("送信しました。続き"), virtualPrefix: 5),
                false)
+    }
+
+    // MARK: - 許可が無いときの案内
+
+    /// 許可まわりは実機でしか確かめられない、と諦めていた場所です。
+    /// TCC の返事は確かに確かめられませんが、**返事を受けて何を出すか**は
+    /// ただの組み立てなので、ここで押さえられます。
+    /// 出す言葉を間違えると、利用者は動かない理由にたどり着けないまま終わります
+    static func advice() {
+        let path = "/Applications/nobetsu.app"
+
+        // アドホック署名。許可の操作を案内しても無駄なので、文面ごと差し替わること
+        var a = PermissionAdvice.make(inputMonitoring: false, accessibility: false,
+                                      adhoc: true, appPath: path)
+        expectContains("アドホックだと、まず署名の話をする", [a.title], "アドホック")
+        expectContains("アドホックだと、ビルドし直せと言う", a.lines, "./build.sh")
+        expectContains("アドホックだと、手で追加しても無駄だと言う", a.lines, "手で追加しても直りません")
+
+        // 入力監視が無い。ここで詰まると、アクセシビリティの要求へは永遠に進まない
+        a = PermissionAdvice.make(inputMonitoring: false, accessibility: false,
+                                  adhoc: false, appPath: path)
+        expectContains("入力監視が先", [a.title], "入力監視")
+        expectContains("入力監視が何の許可かを言う", a.lines, "キーを読む許可")
+        expectContains("アクセシビリティは後だと言う", a.lines, "入力監視が済んでから")
+        expectContains("⌘ を長押ししても何も起きないと言う", a.lines, "⌘ を長押ししても")
+        expectContains("どのアプリの話かを言う", a.lines, path)
+        expect("入力監視の設定への導線を出す", a.showsInputMonitoringButton, true)
+        expect("入力監視が済むまでアクセシビリティへは誘わない", a.showsAccessibilityButton, false)
+
+        // 入力監視は済んでいて、アクセシビリティだけ足りない
+        a = PermissionAdvice.make(inputMonitoring: true, accessibility: false,
+                                  adhoc: false, appPath: path)
+        expectContains("残りはアクセシビリティ", [a.title], "アクセシビリティ")
+        expectContains("何の許可かを言う", a.lines, "他のアプリへ文字を入れる許可")
+        expect("アクセシビリティの設定への導線を出す", a.showsAccessibilityButton, true)
+        expect("済んだ方へは誘わない", a.showsInputMonitoringButton, false)
+
+        // 両方付いているのに見張れない。許可した直後はたいていこれ
+        a = PermissionAdvice.make(inputMonitoring: true, accessibility: true,
+                                  adhoc: false, appPath: path)
+        expectContains("許可のせいではないと言う", [a.title], "許可は付いていますが")
+        expectContains("起動し直せと言う", a.lines, "起動し直す")
     }
 }

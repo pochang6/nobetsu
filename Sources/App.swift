@@ -10,6 +10,12 @@ final class Controller: ObservableObject {
     @Published private(set) var status = "待機中"
     /// 許可が足りていない。メニューバーのアイコンに警告を出すために持つ
     @Published private(set) var needsPermission = true
+    /// 許可が足りていないときに、メニューへ出す案内。
+    ///
+    /// **初期値をここで組み立てないこと。**中身は `AXIsProcessTrusted()` を読むので、
+    /// 入力監視を求める前に触ると、その要求が通らなくなる（下の activateTrigger を参照）。
+    /// 実際に見張りへ失敗してから詰める
+    @Published private(set) var advice: PermissionAdvice?
 
     @Published var useFarField = true {
         didSet { engine.useFarField = useFarField }
@@ -137,13 +143,18 @@ final class Controller: ObservableObject {
             if reason != lastFailureLog {
                 lastFailureLog = reason
                 Log.write(reason)
+                Log.write("trigger: 署名 \(Permissions.signingSummary) / \(Permissions.appPath)")
             }
+            // 何が足りないのかを、利用者の言葉でメニューへ出す。
+            // 警告の三角だけでは「壊れている」としか読めない
+            advice = Permissions.advice
             needsPermission = true
-            status = "許可が必要です"
+            status = advice?.title ?? "許可が必要です"
             return false
         }
         lastFailureLog = ""
         Log.write("trigger: 見張りを開始した")
+        advice = nil
         needsPermission = false
         status = "待機中（⌘ 長押しで開始）"
         permissionPoll?.invalidate()
@@ -180,6 +191,12 @@ final class Controller: ObservableObject {
             Log.write("入力監視を求める: 要求前 \(Permissions.inputMonitoringStatusText)")
             let result = Permissions.promptForInputMonitoring()
             Log.write("入力監視を求めた: 戻り値=\(result) 要求後 \(Permissions.inputMonitoringStatusText)")
+            // 戻り値 false でアドホック署名なら、ほぼこれ。
+            // TCC は尋ねることなく拒否するので、待っていてもダイアログは出ない
+            if !result && Permissions.isAdhocSigned {
+                Log.write("入力監視: アドホック署名のため TCC が即座に拒否した公算が大きい。"
+                          + "自己署名証明書「nobetsu」を作って ./build.sh をやり直すこと")
+            }
             return
         }
 
@@ -455,11 +472,29 @@ struct NobetsuApp: App {
     var body: some Scene {
         MenuBarExtra {
             if controller.needsPermission {
+                // ここは「動かない人が最初に開く場所」です。
+                // 警告の三角を出したまま何も言わないと、壊れていると読まれて終わります。
+                // 何が足りないのか・それが何の許可なのか・どこを開けばよいのかを、
+                // このメニューだけで完結させます
+                if let advice = controller.advice {
+                    Text(advice.title)
+                    ForEach(advice.lines, id: \.self) { line in
+                        Text(line)
+                    }
+                    Divider()
+                    if advice.showsInputMonitoringButton {
+                        Button("入力監視の設定を開く") { Permissions.openInputMonitoringSettings() }
+                    }
+                    if advice.showsAccessibilityButton {
+                        Button("アクセシビリティの設定を開く") { Permissions.openAccessibilitySettings() }
+                    }
+                } else {
+                    Text("許可の状態を調べています")
+                    Divider()
+                    Button("入力監視の設定を開く") { Permissions.openInputMonitoringSettings() }
+                }
                 // 救済措置。ダイアログを閉じてしまった人がここからやり直せる
-                Button("入力監視を許可する") { controller.requestPermissions() }
-                Button("入力監視の設定を開く") { Permissions.openInputMonitoringSettings() }
-                Divider()
-                Text("許可されるまで ⌘ の長押しに反応しません")
+                Button("許可をもう一度求める") { controller.requestPermissions() }
                 Divider()
             } else {
                 Button(controller.isRunning ? "停止" : "話しはじめる") {

@@ -96,12 +96,14 @@ enum Permissions {
         return true
     }
 
-    /// 記録用。アドホック署名かどうかが分かれば、TCC の即時 denied を切り分けられる
-    static var signingSummary: String {
+    /// 自分の署名を見る。（識別子, アドホックか）を返す。取れなければ nil
+    ///
+    /// アドホック署名かどうかが分かると、TCC の即時 denied を切り分けられる。
+    /// 「許可を押していないから出ない」のか「そもそも尋ねてもらえない」のかは、
+    /// 利用者の側からは区別がつかない
+    private static func signingInfo() -> (identifier: String, isAdhoc: Bool)? {
         var code: SecCode?
-        guard SecCodeCopySelf(SecCSFlags(), &code) == errSecSuccess, let code else {
-            return "取得できず"
-        }
+        guard SecCodeCopySelf(SecCSFlags(), &code) == errSecSuccess, let code else { return nil }
         var info: CFDictionary?
         guard SecCodeCopySigningInformation(
             code as! SecStaticCode,
@@ -109,12 +111,39 @@ enum Permissions {
             &info) == errSecSuccess,
             let dict = info as? [String: Any]
         else {
-            return "取得できず"
+            return nil
         }
         let identifier = dict["identifier"] as? String ?? "?"
         let flags = dict["flags"] as? UInt32 ?? 0
-        let isAdhoc = (flags & 0x0000_0002) != 0  // kSecCodeSignatureAdhoc
-        return "\(identifier) \(isAdhoc ? "adhoc(TCC に嫌われる)" : "安定した署名")"
+        return (identifier, (flags & 0x0000_0002) != 0)  // kSecCodeSignatureAdhoc
+    }
+
+    /// アドホック署名で動いているか。
+    /// この状態では入力監視の許可が下りないので、案内の文面を丸ごと差し替える
+    static var isAdhocSigned: Bool {
+        signingInfo()?.isAdhoc ?? false
+    }
+
+    /// 記録用
+    static var signingSummary: String {
+        guard let info = signingInfo() else { return "取得できず" }
+        return "\(info.identifier) \(info.isAdhoc ? "adhoc(TCC に嫌われる)" : "安定した署名")"
+    }
+
+    /// いま動いているアプリの場所。
+    /// 許可は「そのパスにあるアプリ」に紐づくので、リポジトリ内のものと
+    /// /Applications のものは別扱いになる。取り違えると延々と許可が付かない
+    static var appPath: String {
+        Bundle.main.bundleURL.path
+    }
+
+    /// いまの状態から、利用者へ出す案内を組み立てる。
+    /// 文面の組み立て自体は PermissionAdvice（副作用なし・テストあり）にある
+    static var advice: PermissionAdvice {
+        PermissionAdvice.make(inputMonitoring: inputMonitoringGranted,
+                              accessibility: accessibilityGranted,
+                              adhoc: isAdhocSigned,
+                              appPath: appPath)
     }
 
     // MARK: - 設定画面

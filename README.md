@@ -59,6 +59,7 @@ nobetsu は変換工程を丸ごと迂回します。macOS 26 の `DictationTran
 | OS | **macOS 26 (Tahoe) 以降** |
 | CPU | **Apple Silicon**（M1 以降）。Intel Mac では動きません |
 | Xcode | **不要**。コマンドラインツール同梱の `swiftc` だけでビルドできます |
+| コード署名 | **自己署名の証明書が要ります**（[下記](#ソースからビルドする前に1回だけ)）。Apple Developer Program は不要です |
 | 依存ライブラリ | なし。すべて OS 標準のフレームワーク |
 | 動作確認 | MacBook Air (M4, 2024) / macOS 26.5.2 |
 
@@ -66,6 +67,47 @@ M3 や M4 でなくても構いません。初回だけ日本語の認識モデ�
 以後はオフラインで動きます。
 
 ## 入れる
+
+### ソースからビルドする前に（1回だけ）
+
+**自己署名の証明書を1つ作ってください。これが無いと、ビルドは通っても使えません。**
+
+macOS の許可（入力監視・アクセシビリティ）は**署名の同一性**に紐づいて記録されます。
+Apple Developer Program に入っていない Mac でそのままビルドするとアドホック署名になり、
+同一性が無いため **入力監視は許可のダイアログすら出ずに拒否されます。**
+⌘ を長押ししても、うんともすんとも言わないアプリができあがります。
+
+証明書を1枚作れば、これはまるごと消えます。5分で終わる、最初の1回だけの作業です。
+
+1. 「キーチェーンアクセス」を開く
+2. メニューの「キーチェーンアクセス」→「証明書アシスタント」→「自分に証明書を作成」
+3. 名前 `nobetsu` / 固有名のタイプ「**自己署名ルート**」/ 証明書のタイプ「**コード署名**」
+4. できた証明書をダブルクリック →「信頼」→「コード署名」を「**常に信頼**」にする
+5. 初回のビルドでキーチェーンのパスワードを聞かれたら「**常に許可**」を選ぶ
+
+できているかは、ビルドせずに確かめられます。
+
+```bash
+./build.sh --check
+```
+
+`✅ 証明書「nobetsu」で署名できます` と出れば大丈夫です。
+
+証明書が無いとき、`./build.sh` は**設置せずに止まります。**
+動かないアプリを `/Applications` に残しても、動かない理由にたどり着けないためです。
+コンパイルが通ることだけ確かめたい場合は、それと分かる形で先へ進められます。
+
+```bash
+NOBETSU_ALLOW_ADHOC=1 ./build.sh
+```
+
+> **配布された .app を使う場合、この証明書は要りません。**
+> Developer ID で署名・公証されたものには、既に安定した署名の同一性があるためです。
+> ただし**入力監視とアクセシビリティの許可は、どちらにせよ必要です。**
+> なお、いまは配布版がありません。署名と公証には Apple Developer Program（年額）が要るためで、
+> 当面はソースからビルドしてもらう方針です。
+
+### 入れる
 
 ```bash
 git clone https://github.com/pochang6/nobetsu.git
@@ -75,20 +117,31 @@ open /Applications/nobetsu.app
 ```
 
 `./build.sh` がビルドから `/Applications` への設置までを行います。
+`/Applications` に置くのは、システム設定の許可一覧がそこからしかアプリを選べないためです。
 
 メニューバーに波形のアイコンが出ます。ウィンドウも Dock アイコンも出ません。
 
 ### 必要な許可
 
-初回に順番に求められます。macOS 標準のダイアログが出るので、そこで許可してください。
+**入力監視とアクセシビリティは、別々の許可です。**片方だけでは動きません。
+初回に順番に求められるので、macOS 標準のダイアログでそのまま許可してください。
 
-| 許可 | 何に使うか | 聞かれる場面 |
+| 許可 | 何の許可か | 聞かれる場面 |
 |---|---|---|
-| **入力監視** | ⌘ の長押しを待ち受ける | 起動した直後 |
-| **アクセシビリティ** | 文字を他のアプリへ入力する | 初めて ⌘ を長押ししたとき |
+| **入力監視** | **キーを読む**許可。⌘ の長押しを待ち受ける | 起動した直後 |
+| **アクセシビリティ** | **他のアプリへ文字を入れる**許可 | 入力監視のあと |
 | **マイク・音声認識** | 音声を文字にする | 初めて喋るとき |
 
-ダイアログを閉じてしまった場合は、メニューバーのアイコンからやり直せます。
+順番は必ず 入力監視 → アクセシビリティ です。逆にすると入力監視の要求そのものが通らなくなる、
+macOS 側の不具合があるためです。**入力監視が下りない限り、アクセシビリティの要求へは進みません。**
+
+**許可が無い間は、⌘ を長押ししても何も起きません。**そこで許可を聞かれることもありません。
+足りていないときはメニューバーのアイコンが**警告の三角**になり、
+メニューを開くと「何が足りないのか」「それは何の許可か」「どの設定画面を開けばよいか」が出ます。
+ダイアログを閉じてしまった場合も、そこからやり直せます。
+
+許可は「そのパスにあるアプリ」に付きます。設定の一覧で選ぶのは
+`/Applications/nobetsu.app` です（リポジトリの中でビルドしたものとは別扱いになります）。
 
 ## 使う
 
@@ -269,17 +322,12 @@ MacBook Air M4 / macOS 26.5.2 / 日本語の自然な発話 80〜105 秒での�
 
 ## 開発するとき
 
-**自己署名の証明書を1つ作ってください。** これをやらないと、かなり面倒なことになります。
+証明書は[上](#ソースからビルドする前に1回だけ)で作ったものをそのまま使います。
+`build.sh` が `nobetsu` という名前の証明書を自動で探し、**実際に署名できるか**を試してから進みます。
+`security find-identity` の一覧には出ないのに署名は通る、という食い違いが実際にあったためです。
 
-macOS の許可（入力監視・アクセシビリティ）は**署名の同一性**に紐づきます。
-アドホック署名にはそれが無いため、**ビルドのたびに別アプリ扱いになり、許可をやり直すはめになります。**
-入力監視にいたっては、尋ねられることすらなく拒否される場合があります。
-
-キーチェーンアクセス →「証明書アシスタント」→「自分に証明書を作成」→
-名前 `nobetsu` / 固有名のタイプ「自己署名ルート」/ 証明書のタイプ「コード署名」。
-作ったあと、証明書の「信頼」を開いて**コード署名を「常に信頼」**にしてください。
-
-`build.sh` がこの名前の証明書を自動で探して使います。**使うだけなら不要です。**
+署名が固定されていれば、**ビルドし直しても許可はやり直しになりません。**
+ここが崩れると、コードを直すたびに許可を付け直すことになり、それだけで開発が続かなくなります。
 
 ### テスト
 
@@ -371,14 +419,25 @@ more than 20 seconds for text to appear — measured, not guessed.
 
 macOS 26 (Tahoe) or later, Apple Silicon. No Xcode needed.
 
+**Before you build, create a self-signed code-signing certificate named `nobetsu`**
+(Keychain Access → Certificate Assistant → Create a Certificate; Self Signed Root,
+Code Signing; then set its trust for Code Signing to *Always Trust*). macOS ties
+Input Monitoring and Accessibility to a **stable code signature**. An ad-hoc signature
+has none, so Input Monitoring is denied outright — without ever showing a prompt.
+`./build.sh --check` tells you whether signing works, and `./build.sh` refuses to
+install an ad-hoc build rather than leaving a dead app in `/Applications`.
+
 ```bash
 git clone https://github.com/pochang6/nobetsu.git
 cd nobetsu
+./build.sh --check   # certificate in place?
 ./build.sh
 open /Applications/nobetsu.app
 ```
 
-macOS will ask for Input Monitoring and Accessibility the first time each is needed.
+macOS will ask for Input Monitoring first, then Accessibility. They are separate
+permissions and both are required — Input Monitoring to read the ⌘ key, Accessibility
+to type into other apps. Until they are granted, holding ⌘ does nothing at all.
 
 The UI is Japanese only. The recognizer is Japanese only. This is deliberate —
 the problem it solves does not exist outside Japanese.
