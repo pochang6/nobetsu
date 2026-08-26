@@ -41,10 +41,10 @@ open /Applications/nobetsu.app  # 起動
 ./test.sh
 ```
 
-副作用を持たない部分だけを確かめます（辞書の置換、打ち込みの差分計算、許可が無いときの案内、開始キーの設定、ログの圧縮）。
+副作用を持たない部分だけを確かめます（辞書の置換と安全な編集、打ち込みの差分計算、許可が無いときの案内、開始キーの設定、ログの圧縮）。
 アプリは起動しません。`Sources/App.swift` を含めないのは `@main` が衝突するためです。
 
-**この5つを選んだ理由**は、間違えると利用者を壊すか、壊れても気づけないからです。
+**この6つを選んだ理由**は、間違えると利用者を壊すか、壊れても気づけないからです。
 `Injector` の差分計算を誤ると Backspace が他人の文章を削りにいきますし、
 辞書の置換が冪等でないと、打ち直すたびに文章が壊れていきます。
 `PermissionAdvice` の文言を誤ると、利用者は**動かない理由にたどり着けないまま終わります**。
@@ -152,6 +152,7 @@ NOBETSU_ALLOW_ADHOC=1 ./build.sh   # アドホックで設置する。許可は�
 | `Sources/Trigger.swift` | `CGEventTap` によるキーの見張り |
 | `Sources/FocusWatcher.swift` | 入力先から離れたかの見張り。離れたら止める |
 | `Sources/Phrases.swift` | 辞書（言い換え表）の読み込みと適用 |
+| `Sources/DictionaryEditor.swift` | 辞書の曖昧検索と安全な追加・置換・削除。副作用なし |
 | `Tests/main.swift` | 副作用を持たない部分のテスト。`./test.sh` で走る |
 | `Sources/Indicator.swift` | 認識中の目印（左上に浮く小さな表示） |
 | `Sources/Overlay.swift` | 認識中の文字を流す表示（既定で無効） |
@@ -160,10 +161,11 @@ NOBETSU_ALLOW_ADHOC=1 ./build.sh   # アドホックで設置する。許可は�
 | `Sources/Sounds.swift` | 開始音と終了音 |
 | `Sources/LoginItem.swift` | ログイン時の自動起動 |
 | `Sources/Log.swift` | ログ出力。1MB を超えたら圧縮して退避する（いまのものを含めて5世代） |
-| `dictionary.txt` | 共有する辞書。`build.sh` がアプリへ焼き込む |
+| `dictionary.sample.txt` | 公開してよい共通辞書。`build.sh` がアプリへ焼き込む |
+| `dictionary.txt` | この Mac の個人辞書。git では追跡せず、アプリにも焼き込まない |
 | `TODO.md` | これからやること。実際に困った順に並べる |
 | `PUBLISH.md` | OSS として公開するまでの計画。**公開前に必ず読むこと** |
-| `.claude/skills/dictionary/` | 誤変換を見つけて辞書に育てる手順（AI 向け）。`check.sh` で辞書全体を点検できる |
+| `.claude/skills/dictionary/` | 誤変換を育てる手順（AI 向け）。`manage.sh` で編集し、`check.sh` で全体を点検する |
 | `AGENTS.md` / `.agents/skills/` | Codex 向けの写し。内容の正本は `CLAUDE.md` / `.claude/skills/` |
 | `.local/` | この Mac だけの覚書。**git では追跡しない**（下の「手元の覚書」） |
 | `spike/` | 採用判断のための計測アプリ（本体とは独立） |
@@ -255,6 +257,8 @@ tap を外す → 停止 → reset → インスタンス破棄まで揃えて�
 途中で一瞬おかしな形に化けても、次の更新で打ち直されます。
 辞書は2枚（アプリ同梱＝git で共有 / 個人＝その Mac だけ）で、後者が勝ちます。
 読むのは**喋りはじめる瞬間**なので、書き換えたら次のひと言から効きます。
+個人辞書はアプリ内へ複製しません。複製すると、個人辞書から削除・修正した古い規則が
+同梱側に残り、次の入力で復活するためです。
 
 **Enter は「送信」であると同時に「利用者の操作」でもある。**
 イベントタップは `userTookOver()` を先に呼ぶので、`userSubmitted()` に届く時点で

@@ -138,13 +138,10 @@ swiftc \
   Sources/*.swift \
   -o "$APP/Contents/MacOS/$APP_NAME"
 
-# 辞書はアプリの中へ焼き込む。
-# git で管理されるので、複数の Mac で同じ辞書を共有できる。
-# その Mac だけの調整は ~/Library/Application Support/nobetsu/dictionary.txt へ書く
-# 自分用の dictionary.txt があればそれを、無ければ見本を焼き込む。
-# dictionary.txt は .gitignore してある（辞書には仕事の固有名詞が溜まるため）
+# 公開用の同梱辞書だけをアプリの中へ焼き込む。
+# 個人用の dictionary.txt まで複製すると、元から規則を削除してもアプリ内の古い複製が
+# 生き残ってしまう。個人辞書は Application Support から毎回読むので、焼き込まない。
 DICT="dictionary.sample.txt"
-[ -f dictionary.txt ] && DICT="dictionary.txt"
 if [ -f "$DICT" ]; then
   cp "$DICT" "$APP/Contents/Resources/dictionary.txt"
   echo "==> dictionary: $(grep -cE '^[^#]*(=>|→)' "$DICT") 件 ($DICT)"
