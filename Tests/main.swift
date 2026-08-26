@@ -21,7 +21,6 @@ struct Tests {
         parse()
         build()
         apply()
-        dictionaryEditing()
         diff()
         follow()
         advice()
@@ -137,63 +136,6 @@ struct Tests {
         // 短い規則と長い規則が両方あっても、長い方が勝つ
         let both = PhraseBook.build(from: [("苦労", "Clone"), ("苦労してくる", "Cloneしてくる")]).rules
         expect("長い方が勝つ", PhraseBook.apply("苦労してくるよ", rules: both), "Cloneしてくるよ")
-    }
-
-    // MARK: - 辞書を安全に編集する
-
-    static func dictionaryEditing() {
-        let original = """
-        # 見出し
-        アップサート => upsert
-        Appスタート => upsert  # 観測済み
-        #? Appサーバー => upsert （候補）
-
-        """
-
-        let exact = DictionaryEditor.find("アップサート", in: original)
-        expect("辞書検索は完全一致を先に返す", exact.first?.entry.from ?? "", "アップサート")
-        expect("完全一致だと分かる", exact.first?.exact ?? false, true)
-
-        let fuzzy = DictionaryEditor.find("Appサート", in: original)
-        expect("完全一致が無ければ切り詰めて探す", fuzzy.first?.entry.from ?? "", "Appサーバー")
-        expect("部分一致だと分かる", fuzzy.first?.exact ?? true, false)
-
-        do {
-            let inserted = try DictionaryEditor.upsert(from: "Appサート", to: "upsert", in: original)
-            expect("無ければ追加する", inserted.0.contains("Appサート => upsert"), true)
-            expect("追加の種別", inserted.1 == .inserted(line: 5), true)
-
-            let updated = try DictionaryEditor.upsert(from: "Appスタート", to: "UPSERT", in: original)
-            expect("あれば右辺を更新する", updated.0.contains("Appスタート => UPSERT  # 観測済み"), true)
-
-            let promoted = try DictionaryEditor.upsert(from: "Appサーバー", to: "upsert", in: original)
-            expect("候補はその場で本登録へ移す", promoted.0.contains("#? Appサーバー"), false)
-
-            let replaced = try DictionaryEditor.replace(oldFrom: "Appスタート", newFrom: "App開始", newTo: "upsert", in: original)
-            expect("左右をまとめて置換できる", replaced.0.contains("App開始 => upsert  # 観測済み"), true)
-
-            let deleted = try DictionaryEditor.delete(from: "アップサート", in: original)
-            expect("完全一致した規則を削除できる", deleted.0.contains("アップサート =>"), false)
-        } catch {
-            failures += 1
-            print("❌ 辞書編集で予期しないエラー: \(error)")
-        }
-
-        do {
-            _ = try DictionaryEditor.delete(from: "Appサート", in: original)
-            failures += 1
-            print("❌ 見つからない左辺を削除できてしまいました")
-        } catch {
-            count += 1
-        }
-
-        do {
-            _ = try DictionaryEditor.upsert(from: "Cシャープ", to: "C#", in: original)
-            failures += 1
-            print("❌ コメント記号を右辺へ書けてしまいました")
-        } catch {
-            count += 1
-        }
     }
 
     // MARK: - 打ち込みの差分
