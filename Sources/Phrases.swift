@@ -8,13 +8,12 @@ import AppKit
 ///
 /// 辞書は2枚ある。読む順番に意味がある。
 ///
-/// 1. 同梱辞書 — リポジトリの `dictionary.sample.txt`。`build.sh` がアプリへ焼き込む。
-///    git で管理される、公開してよい共通の規則
+/// 1. 同梱辞書 — リポジトリの `dictionary.txt`。`build.sh` がアプリへ焼き込む。
+///    git で管理されるので、複数の Mac で同じ辞書を共有できる
 /// 2. 個人辞書 — `~/Library/Application Support/nobetsu/dictionary.txt`。
 ///    その Mac だけの調整。**ビルドし直さずに直せる**
 ///
-/// 個人用の `dictionary.txt` は同梱しない。古い規則を個人辞書から削除したとき、
-/// アプリ内の複製から復活してしまうのを防ぐため。同じ「認識結果」が両方にあれば個人辞書が勝つ。
+/// 同じ「認識結果」が両方にあれば個人辞書が勝つ。
 /// 読み込むのは認識を始める瞬間なので、書き換えたら次に喋れば反映される。
 @MainActor
 final class PhraseBook {
