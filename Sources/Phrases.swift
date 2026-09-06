@@ -6,15 +6,9 @@ import AppKit
 /// 音声認識は「Clone」を「苦労」と書く。話し言葉としては正しいので、
 /// 認識器を責めても直らない。**打つ前にこちらで直す**のが唯一の現実的な手当て。
 ///
-/// 辞書は2枚ある。読む順番に意味がある。
-///
-/// 1. 同梱辞書 — リポジトリの `dictionary.txt`。`build.sh` がアプリへ焼き込む。
-///    git で管理されるので、複数の Mac で同じ辞書を共有できる
-/// 2. 個人辞書 — `~/Library/Application Support/nobetsu/dictionary.txt`。
-///    その Mac だけの調整。**ビルドし直さずに直せる**
-///
-/// 同じ「認識結果」が両方にあれば個人辞書が勝つ。
-/// 読み込むのは認識を始める瞬間なので、書き換えたら次に喋れば反映される。
+/// 公開サンプル → 旧形式のローカル辞書（あれば）→ 個人辞書の順に読む。
+/// 個人の語彙はアプリへ焼き込まない。同じ左辺は後のファイルが勝つ。
+/// ファイル・リンクは利用者のもの。更新時にも上書きや削除をしない。
 @MainActor
 final class PhraseBook {
 
@@ -33,53 +27,53 @@ final class PhraseBook {
 
     /// 個人辞書（この Mac だけ）
     static var personalURL: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory,
-                                            in: .userDomainMask)[0]
-        return base.appending(path: "nobetsu/dictionary.txt")
+        DictionaryStorage.directory.appendingPathComponent("dictionary.txt")
     }
 
     // MARK: - 読み込み
 
-    /// 変わっていれば読み直す。認識を始めるたびに呼ぶので、軽くしておく
+    private func files() throws -> [URL] {
+        DictionaryStorage.unique([PhraseBook.bundledURL].compactMap { $0 }
+            + (try DictionaryStorage.legacyURLs(in: DictionaryStorage.directory))
+            + [PhraseBook.personalURL])
+    }
+
     func reloadIfNeeded() {
-        let files = [PhraseBook.bundledURL, PhraseBook.personalURL].compactMap { $0 }
-        var changed = false
-        for url in files {
-            // シンボリックリンクの先を見る。
-            // 個人辞書をリポジトリの辞書へのリンクにしている場合、
-            // リンク自身の更新時刻は中身を書き換えても変わらない
-            let path = url.resolvingSymlinksInPath().path
-            let modified = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
-            if stamps[url] != modified {
-                stamps[url] = modified
-                changed = true
+        do {
+            let files = try files()
+            var nextStamps: [URL: Date] = [:]
+            for url in files where DictionaryStorage.exists(url) {
+                let path = url.resolvingSymlinksInPath().path
+                let attrs = try FileManager.default.attributesOfItem(atPath: path)
+                nextStamps[url] = attrs[.modificationDate] as? Date
             }
+            guard stamps != nextStamps || rules.isEmpty else { return }
+            try load(files)
+            stamps = nextStamps
+        } catch {
+            // 読めないときは最後に読めた辞書を維持する。中身・個人パスはログへ渡さない。
+            Log.write("phrases: 辞書を読み込めないため直前の規則を維持した。保存先・リンク先を確認してください")
         }
-        guard changed || rules.isEmpty else { return }
-        load(files)
     }
 
     func reload() {
         stamps = [:]
-        load([PhraseBook.bundledURL, PhraseBook.personalURL].compactMap { $0 })
+        reloadIfNeeded()
     }
 
-    private func load(_ files: [URL]) {
+    private func load(_ files: [URL]) throws {
         var pairs: [Rule] = []
         var counts: [String] = []
-
-        for url in files {
-            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+        for (index, url) in files.enumerated() where DictionaryStorage.exists(url) {
+            let text = try String(contentsOf: url, encoding: .utf8)
             let parsed = PhraseBook.parse(text)
-            // 後から読んだ方（個人辞書）が勝つ
             pairs.append(contentsOf: parsed)
-            counts.append("\(url.lastPathComponent)=\(parsed.count)")
+            counts.append("辞書\(index + 1)=\(parsed.count)")
         }
-
         let built = PhraseBook.build(from: pairs)
         rules = built.rules
-        for rejected in built.rejected {
-            Log.write("phrases: 「\(rejected)」は左が右の一部なので使わない")
+        if !built.rejected.isEmpty {
+            Log.write("phrases: 左辺が右辺に含まれる規則を \(built.rejected.count) 件除外した")
         }
         Log.write("phrases: 辞書を読み込んだ \(rules.count) 件 [\(counts.joined(separator: " "))]")
     }
@@ -171,15 +165,18 @@ final class PhraseBook {
     /// 個人辞書を開く。無ければ、書き方の分かる雛形を作ってから開く
     func openPersonalFile() {
         let url = PhraseBook.personalURL
-        let fm = FileManager.default
-
-        if !fm.fileExists(atPath: url.path) {
-            try? fm.createDirectory(at: url.deletingLastPathComponent(),
-                                    withIntermediateDirectories: true)
-            try? PhraseBook.template.write(to: url, atomically: true, encoding: .utf8)
-            Log.write("phrases: 個人辞書を作った \(url.path)")
+        do {
+            try DictionaryStorage.createIfMissing(Data(PhraseBook.template.utf8), at: url)
+            guard FileManager.default.isReadableFile(atPath: url.path) else {
+                throw CocoaError(.fileReadNoPermission)
+            }
+            NSWorkspace.shared.open(url)
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "個人辞書を開けませんでした"
+            alert.informativeText = "既存のファイル・リンクは上書きしていません。保存先の権限やリンク先を確認してください。"
+            alert.runModal()
         }
-        NSWorkspace.shared.open(url)
     }
 
     private static let template = """

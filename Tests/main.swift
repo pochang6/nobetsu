@@ -26,6 +26,9 @@ struct Tests {
         advice()
         triggerSettings()
         archive()
+        dictionaryStorage()
+        dictationLifecycle()
+        indicatorPlacement()
 
         print("")
         if failures == 0 {

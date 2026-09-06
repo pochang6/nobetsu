@@ -42,6 +42,9 @@ final class FocusWatcher {
     var onLeave: ((String) -> Void)?
     /// 同じアプリの中で、別の入力欄へフォーカスが移った
     var onMovedWithinApp: (() -> Void)?
+    /// 入力欄と前面ウィンドウの AX 座標。文字列の内容は取得・転送しない。
+    var onGeometry: ((CGRect?, CGRect?) -> Void)?
+    private var generation: UInt64 = 0
 
     private var notifications: [NSObjectProtocol] = []
     private var poll: Timer?
@@ -123,6 +126,7 @@ final class FocusWatcher {
     }
 
     func stop() {
+        generation &+= 1
         poll?.invalidate()
         poll = nil
         querying = false
@@ -162,15 +166,22 @@ final class FocusWatcher {
         querying = true
 
         let pid = targetPID
+        let token = generation
         let known = focused
         let everSeen = exposesFocus
         let enableManual = !didTryManual
         didTryManual = true
 
-        FocusWatcher.queue.async {
+        FocusWatcher.queue.async { [weak self] in
             let verdict = FocusWatcher.inspect(pid: pid, known: known,
                                                everSeen: everSeen, enableManual: enableManual)
-            Task { @MainActor in FocusWatcher.shared?.apply(verdict) }
+            let geometry = FocusWatcher.geometry(pid: pid)
+            Task { @MainActor in
+                guard let self, self.generation == token, self.targetPID == pid else { return }
+                self.apply(verdict)
+                guard self.isWatching, self.generation == token else { return }
+                self.onGeometry?(geometry.input, geometry.window)
+            }
         }
     }
 
@@ -219,6 +230,39 @@ final class FocusWatcher {
 
         let role = role(of: element)
         return acceptsText(element, role: role) ? .movedToText(element, role) : .notText(role)
+    }
+
+    private nonisolated static func frame(of element: AXUIElement) -> CGRect? {
+        var positionValue: CFTypeRef?
+        var sizeValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionValue) == .success,
+              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeValue) == .success,
+              let positionValue, let sizeValue,
+              CFGetTypeID(positionValue) == AXValueGetTypeID(),
+              CFGetTypeID(sizeValue) == AXValueGetTypeID() else { return nil }
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(positionValue as! AXValue, .cgPoint, &position),
+              AXValueGetValue(sizeValue as! AXValue, .cgSize, &size),
+              position.x.isFinite, position.y.isFinite, size.width.isFinite, size.height.isFinite,
+              size.width > 0, size.height > 0 else { return nil }
+        return CGRect(origin: position, size: size)
+    }
+
+    private nonisolated static func geometry(pid: pid_t) -> (input: CGRect?, window: CGRect?) {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, messagingTimeout)
+        var input: CGRect?
+        if let element = focusedElement(of: app), acceptsText(element, role: role(of: element)) {
+            input = frame(of: element)
+        }
+        var window: CFTypeRef?
+        var windowFrame: CGRect?
+        if AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &window) == .success,
+           let window, CFGetTypeID(window) == AXUIElementGetTypeID() {
+            windowFrame = frame(of: window as! AXUIElement)
+        }
+        return (input, windowFrame)
     }
 
     /// Chromium/Electron 製のアプリに「入力欄の場所を用意して」と頼む。
@@ -304,6 +348,8 @@ final class FocusWatcher {
         guard isWatching, let front = NSWorkspace.shared.frontmostApplication else { return }
         if front.bundleIdentifier == Bundle.main.bundleIdentifier { return }
 
+        generation &+= 1
+        querying = false
         targetPID = front.processIdentifier
         targetName = front.localizedName ?? front.bundleIdentifier ?? "?"
         focused = nil

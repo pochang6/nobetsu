@@ -31,6 +31,15 @@ final class IndicatorController {
     private let model = IndicatorModel()
     private var moveObserver: NSObjectProtocol?
     private var cursorKeeper: Timer?
+    private var spaceObserver: NSObjectProtocol?
+    private var screenObserver: NSObjectProtocol?
+    private var wantsVisible = false
+    private var visibilityGeneration: UInt64 = 0
+    private var isPositioning = false
+    private var inputFrame: CGRect?
+    private var targetWindowFrame: CGRect?
+    private var lastScreenNumber: NSNumber?
+    private var spaceGeneration: UInt64 = 0
     /// 直近に文字を打ち込んだ時刻。カーソルが隠されるのはこの直後だけ
     private var lastInjectAt = Date.distantPast
     private var lastNudgeAt = Date.distantPast
@@ -38,10 +47,12 @@ final class IndicatorController {
     private static let size = NSSize(width: 222, height: 42)
 
     func show() {
+        wantsVisible = true
+        visibilityGeneration &+= 1
         if panel == nil { build() }
         guard let panel else { return }
 
-        panel.setFrameOrigin(savedOrigin(for: panel))
+        reposition()
         panel.alphaValue = 0
         panel.orderFrontRegardless()
 
@@ -131,6 +142,9 @@ final class IndicatorController {
     }
 
     func hide() {
+        wantsVisible = false
+        visibilityGeneration &+= 1
+        let token = visibilityGeneration
         // 消える前に、隠れたままのカーソルを出しておく。
         // 打ち込みが終わってから出し直す機会は、もう無い
         if let panel, panel.isVisible { nudgeCursor() }
@@ -147,8 +161,11 @@ final class IndicatorController {
             context.duration = 0.35
             context.timingFunction = CAMediaTimingFunction(name: .easeIn)
             panel.animator().alphaValue = 0
-        } completionHandler: {
-            panel.orderOut(nil)
+        } completionHandler: { [weak self] in
+            Task { @MainActor in
+                guard let self, !self.wantsVisible, self.visibilityGeneration == token else { return }
+                panel.orderOut(nil)
+            }
         }
     }
 
@@ -159,8 +176,7 @@ final class IndicatorController {
     /// 置き場所を初期位置に戻す
     func resetPosition() {
         Defaults.indicatorOffset = nil
-        guard let panel else { return }
-        panel.setFrameOrigin(defaultOrigin())
+        reposition()
     }
 
     // MARK: - 組み立て
@@ -177,7 +193,7 @@ final class IndicatorController {
         p.backgroundColor = .clear
         p.hasShadow = true
         p.hidesOnDeactivate = false
-        p.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
+        p.collectionBehavior = [.canJoinAllSpaces, .canJoinAllApplications, .stationary, .fullScreenAuxiliary, .ignoresCycle]
 
         // 背景をつかんで動かせるようにする。ボタンの上以外はどこでも掴める
         p.isMovable = true
@@ -197,18 +213,25 @@ final class IndicatorController {
 
         // 動かした場所を覚える。毎回同じところに出ないと落ち着かない
         moveObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.didMoveNotification,
-            object: p,
-            queue: .main
-        ) { note in
-            guard let moved = note.object as? NSWindow else { return }
-            // 覚えるのは画面のどこか（左下からの距離）。絶対の座標で覚えると、
-            // 別の画面で使ったときに画面の外や見当違いの場所へ出る
-            let frame = moved.frame
-            let screen = NSScreen.screens.first { $0.frame.intersects(frame) }
-            guard let visible = screen?.visibleFrame else { return }
-            let offset = NSPoint(x: frame.minX - visible.minX, y: frame.minY - visible.minY)
-            Task { @MainActor in Defaults.indicatorOffset = offset }
+            forName: NSWindow.didMoveNotification, object: p, queue: .main
+        ) { [weak self] note in
+            MainActor.assumeIsolated {
+                guard let self, !self.isPositioning, NSEvent.pressedMouseButtons != 0,
+                      let moved = note.object as? NSWindow,
+                      let screen = moved.screen else { return }
+                Defaults.indicatorOffset = CGPoint(x: moved.frame.minX - screen.visibleFrame.minX,
+                                                  y: moved.frame.minY - screen.visibleFrame.minY)
+            }
+        }
+        spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.refreshSpace() }
+        }
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.refreshSpace() }
         }
 
         panel = p
@@ -232,10 +255,57 @@ final class IndicatorController {
     /// マウスのいる画面を使う。喋りはじめる直前に入力欄を押しているので、
     /// たいていそこが作業している画面になる
     private func currentScreen() -> NSScreen? {
+        if let target = inputFrame ?? targetWindowFrame {
+            let screen = NSScreen.screens.max { a, b in
+                let left = a.frame.intersection(target)
+                let right = b.frame.intersection(target)
+                return (left.isNull ? 0 : left.width * left.height) < (right.isNull ? 0 : right.width * right.height)
+            }
+            if let screen, screen.frame.intersects(target) {
+                lastScreenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+                return screen
+            }
+        }
+        // AX の一時的な欠落でマウス側の画面へ飛ばない。
+        if let lastScreenNumber, let screen = NSScreen.screens.first(where: {
+            $0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber == lastScreenNumber
+        }) { return screen }
         let mouse = NSEvent.mouseLocation
-        return NSScreen.screens.first { $0.frame.contains(mouse) }
-            ?? NSScreen.main
-            ?? NSScreen.screens.first
+        return NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.screens.first
+    }
+
+    func follow(inputAXFrame: CGRect?, windowAXFrame: CGRect?) {
+        guard let primary = NSScreen.screens.first else { return }
+        let input = inputAXFrame.map { IndicatorPlacement.appKitFrame($0, primaryHeight: primary.frame.height) }
+        let window = windowAXFrame.map { IndicatorPlacement.appKitFrame($0, primaryHeight: primary.frame.height) }
+        let changed = input != inputFrame || window != targetWindowFrame
+        inputFrame = input
+        targetWindowFrame = window
+        guard wantsVisible else { return }
+        reposition()
+        if changed || panel?.isOnActiveSpace == false { panel?.orderFrontRegardless() }
+    }
+
+    private func reposition() {
+        guard let panel, NSEvent.pressedMouseButtons == 0 else { return }
+        isPositioning = true
+        defer { isPositioning = false }
+        panel.setFrameOrigin(savedOrigin(for: panel))
+    }
+
+    private func refreshSpace() {
+        guard wantsVisible else { return }
+        spaceGeneration &+= 1
+        let token = spaceGeneration
+        // Space の通知は遷移開始時に来ることがある。遷移後にも前面へ戻す。
+        for delay in [0.15, 0.55] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, self.wantsVisible, self.spaceGeneration == token else { return }
+                self.reposition()
+                self.panel?.orderFrontRegardless()
+            }
+        }
+        Log.write("indicator: Space・画面の変更に追従する")
     }
 
     /// 覚えた位置は「画面の左下からの距離」なので、どの画面でも同じ場所に出る
@@ -243,12 +313,7 @@ final class IndicatorController {
         guard let screen = currentScreen() else { return NSPoint(x: 200, y: 300) }
         guard let offset = Defaults.indicatorOffset else { return defaultOrigin() }
 
-        let visible = screen.visibleFrame
-        let size = IndicatorController.size
-        // 画面の大きさは同じとは限らない。はみ出すなら画面の中へ寄せる
-        let x = min(max(visible.minX + offset.x, visible.minX), visible.maxX - size.width)
-        let y = min(max(visible.minY + offset.y, visible.minY), visible.maxY - size.height)
-        return NSPoint(x: x, y: y)
+        return IndicatorPlacement.origin(offset: offset, size: Self.size, visible: screen.visibleFrame)
     }
 
     /// 画面の左から 1/3 のあたりに**右端**が来るように置き、高さは下から約 1/3。
@@ -266,9 +331,9 @@ final class IndicatorController {
 
 
     deinit {
-        if let moveObserver {
-            NotificationCenter.default.removeObserver(moveObserver)
-        }
+        if let moveObserver { NotificationCenter.default.removeObserver(moveObserver) }
+        if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
+        if let spaceObserver { NSWorkspace.shared.notificationCenter.removeObserver(spaceObserver) }
     }
 }
 
@@ -299,7 +364,7 @@ private struct IndicatorView: View {
 
             // 押しても消えない。認識だけ止まって、再開できる形に変わる
             if model.isRunning {
-                iconButton("pause.fill", help: "一時停止", action: onPause)
+                iconButton("pause.fill", help: "音声入力を一時停止してマイクを解放する", action: onPause)
             } else {
                 iconButton("mic.fill", help: "再開", tint: .accentColor, action: onResume)
             }
@@ -310,7 +375,7 @@ private struct IndicatorView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .background(.regularMaterial, in: Capsule())
         .overlay(Capsule().strokeBorder(Color.primary.opacity(0.10), lineWidth: 1))
-        .help("ドラッグで移動できます")
+        .help(model.isRunning ? "録音中です。黙っていてもマイクを使っています。ドラッグで位置を調整できます" : "音声入力は一時停止中です。マイクは解放されています")
         .onAppear { pulse = true }
     }
 

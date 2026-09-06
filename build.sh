@@ -9,6 +9,12 @@ VERSION="$(cat VERSION 2>/dev/null || echo 0.0.0)"
 BUILD_DIR="build"
 APP="$BUILD_DIR/$APP_NAME.app"
 SDK="$(xcrun --show-sdk-path)"
+MODE="${1:-}"
+case "$MODE" in
+  ""|--check|--build-only|--restart) ;;
+  *) echo "使い方: ./build.sh [--check|--build-only|--restart]" >&2; exit 2 ;;
+esac
+BUILD_ID="$(uuidgen)"
 
 # macOS の許可（入力監視 / アクセシビリティ）は、署名の同一性に紐づいて記録される。
 # アドホック署名にはその同一性が無いため、ビルドのたびに別アプリ扱いになり、
@@ -100,6 +106,16 @@ else
   echo "⚠️  NOBETSU_ALLOW_ADHOC=1: アドホック署名で続行します（許可は下りません）"
 fi
 
+# 同時更新で辞書の引き継ぎやアプリの退避先が競合しないようにする。
+LOCK="/tmp/nobetsu-install-$(id -u).lock"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  echo "別の更新が進行中です。終了を待ってからやり直してください: $LOCK" >&2
+  exit 1
+fi
+trap 'rmdir "$LOCK"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
@@ -115,6 +131,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
+  <key>NobetsuBuildID</key><string>$BUILD_ID</string>
+  <key>NobetsuDictionaryLayout</key><string>external-v1</string>
   <key>LSMinimumSystemVersion</key><string>26.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
@@ -138,17 +156,9 @@ swiftc \
   Sources/*.swift \
   -o "$APP/Contents/MacOS/$APP_NAME"
 
-# 辞書はアプリの中へ焼き込む。
-# git で管理されるので、複数の Mac で同じ辞書を共有できる。
-# その Mac だけの調整は ~/Library/Application Support/nobetsu/dictionary.txt へ書く
-# 自分用の dictionary.txt があればそれを、無ければ見本を焼き込む。
-# dictionary.txt は .gitignore してある（辞書には仕事の固有名詞が溜まるため）
-DICT="dictionary.sample.txt"
-[ -f dictionary.txt ] && DICT="dictionary.txt"
-if [ -f "$DICT" ]; then
-  cp "$DICT" "$APP/Contents/Resources/dictionary.txt"
-  echo "==> dictionary: $(grep -cE '^[^#]*(=>|→)' "$DICT") 件 ($DICT)"
-fi
+# 個人の語彙はアプリへ入れない。既存辞書の保護は設置直前に別途行う。
+cp dictionary.sample.txt "$APP/Contents/Resources/dictionary.txt"
+echo "==> dictionary: 公開サンプルのみ"
 
 if [ "$SIGNABLE" = "1" ]; then
   echo "==> signing ($IDENTITY)"
@@ -164,15 +174,21 @@ else
   codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1
 fi
 
-# システム設定の一覧（アクセシビリティ / 入力監視）は、+ を押すと
-# 「アプリケーション」フォルダを開く。リポジトリの中に置いたままだと
-# ユーザーはそこから nobetsu を選べない。だから決まった場所に置く。
-# パスが固定されることで、許可の登録も安定する。
+if [ "$MODE" = "--build-only" ]; then
+  echo "==> built: $(pwd)/${APP}（設置・個人辞書へのアクセスなし）"
+  exit 0
+fi
+
 INSTALLED="/Applications/$APP_NAME.app"
-echo "==> installing to $INSTALLED"
-pkill -f "$APP_NAME.app/Contents/MacOS/$APP_NAME" 2>/dev/null || true
-rm -rf "$INSTALLED"
-ditto "$APP" "$INSTALLED"
+swiftc -parse-as-library -swift-version 5 -target arm64-apple-macos26.0 -sdk "$SDK" \
+  Sources/DictionaryStorage.swift Tools/PrepareDictionary.swift -o "$BUILD_DIR/prepare-dictionary"
+"$BUILD_DIR/prepare-dictionary" "$(pwd)/dictionary.txt" \
+  "$INSTALLED/Contents/Resources/dictionary.txt" "$(pwd)/dictionary.sample.txt"
+
+source scripts/install-app.sh
+RESTART=0
+[ "$MODE" = "--restart" ] && RESTART=1
+install_app "$APP" "$INSTALLED" "$RESTART" "$BUILD_ID"
 
 echo "==> built:     $(pwd)/$APP"
 echo "==> installed: $INSTALLED"

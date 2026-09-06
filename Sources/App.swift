@@ -7,6 +7,7 @@ final class Controller: ObservableObject {
     static let shared = Controller()
 
     @Published private(set) var isRunning = false
+    @Published private(set) var isActive = false
     @Published private(set) var status = "待機中"
     /// 許可が足りていない。メニューバーのアイコンに警告を出すために持つ
     @Published private(set) var needsPermission = true
@@ -121,6 +122,9 @@ final class Controller: ObservableObject {
             }
             self.stopBecauseFocusLeft(reason)
         }
+        focusWatcher.onGeometry = { [weak self] input, window in
+            self?.indicator.follow(inputAXFrame: input, windowAXFrame: window)
+        }
         focusWatcher.onMovedWithinApp = { [weak self] in self?.injector.userTookOver() }
     }
 
@@ -171,6 +175,8 @@ final class Controller: ObservableObject {
         }
         lastFailureLog = ""
         Log.write("trigger: 見張りを開始した")
+        let buildID = Bundle.main.object(forInfoDictionaryKey: "NobetsuBuildID") as? String ?? "legacy"
+        Log.write("bootstrap: ready build=\(buildID)")
         advice = nil
         needsPermission = false
         status = "待機中（⌘ 長押しで開始）"
@@ -238,10 +244,10 @@ final class Controller: ObservableObject {
 
     // MARK: - 開始と停止
 
-    func toggle() { isRunning ? stop() : start() }
+    func toggle() { engine.isActive ? stop() : start() }
 
     func start() {
-        guard !isRunning else { return }
+        guard engine.canStart else { return }
 
         // 文字を打ち込むにはアクセシビリティが要る。無いまま始めると
         // 認識はできているのに何も入らない、という一番わけの分からない状態になる。
@@ -367,7 +373,7 @@ final class Controller: ObservableObject {
     /// **押していないのに終わる**ので、普段の終了音と同じでは何が起きたのか分からない。
     /// 音を変えて、止まった理由もメニューに残す
     private func stopBecauseFocusLeft(_ reason: String) {
-        guard isRunning else { return }
+        guard engine.isActive else { return }
         autoStopReason = reason
         keepIndicatorVisible = false
         halt(auto: true)
@@ -384,7 +390,7 @@ final class Controller: ObservableObject {
 
     private func halt(auto: Bool = false) {
         focusWatcher.stop()
-        guard isRunning else { return }
+        guard engine.isActive else { return }
         // 止める操作をした「今」鳴らす。後始末を待つと、止めたのに無反応な時間が生まれる
         if auto { Sounds.playAutoStop() } else { Sounds.playStop() }
         // 先に門を閉じる。停止後に遅れて届く確定結果を打ち込むと二重入力になる
@@ -422,6 +428,11 @@ extension Controller: DictationDelegate {
 
     func dictation(didChangeRunning running: Bool, message: String) {
         isRunning = running
+        isActive = engine.isActive
+        if !isActive {
+            injector.endSession()
+            focusWatcher.stop()
+        }
         // なぜ止まったのかは、押していない停止のときこそ知りたい
         if !running, let reason = autoStopReason {
             status = "\(reason)ので止めました"
@@ -430,7 +441,7 @@ extension Controller: DictationDelegate {
         }
         // 一時停止して目印が残っている間も ESC で閉じられるようにしておく。
         // × を押すしかない状態にすると、キーボードから抜け出せなくなる
-        trigger.isRunning = running || keepIndicatorVisible
+        trigger.isRunning = isActive || keepIndicatorVisible
 
         if running {
             if showsIndicator {
@@ -584,7 +595,7 @@ struct NobetsuApp: App {
                 Button("許可をもう一度求める") { controller.requestPermissions() }
                 Divider()
             } else {
-                Button(controller.isRunning ? "停止" : "話しはじめる") {
+                Button(controller.isActive ? "停止" : "話しはじめる") {
                     controller.toggle()
                 }
                 Text(controller.status)
@@ -596,7 +607,7 @@ struct NobetsuApp: App {
 
             Toggle("ログイン時に起動", isOn: $controller.launchAtLogin)
             Toggle("開始と終了を音で知らせる", isOn: $controller.soundEnabled)
-            Toggle("左上に認識中の目印を出す", isOn: $controller.showsIndicator)
+            Toggle("認識中の目印を出す", isOn: $controller.showsIndicator)
             Toggle("認識中の文字を画面に流す", isOn: $controller.showsTranscript)
 
             Picker("開始までの長押し: \(controller.holdThreshold, specifier: "%.1f") 秒",
@@ -615,12 +626,15 @@ struct NobetsuApp: App {
             .pickerStyle(.menu)
             Toggle("入力先から離れたら止める", isOn: $controller.stopsWhenFocusLeaves)
             Toggle("遠距離マイク補正", isOn: $controller.useFarField)
-                .disabled(controller.isRunning)
+                .disabled(controller.isActive)
 
             Divider()
 
             Button("辞書を編集する") { controller.editDictionary() }
             Button("辞書を読み直す") { controller.reloadDictionary() }
+            Button("引き継いだ辞書・バックアップを開く") {
+                NSWorkspace.shared.open(DictionaryStorage.directory)
+            }
 
             Divider()
 

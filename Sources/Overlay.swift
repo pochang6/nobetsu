@@ -46,7 +46,7 @@ final class OverlayController {
         p.ignoresMouseEvents = true
         p.hidesOnDeactivate = false
         p.isMovable = false
-        p.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
+        p.collectionBehavior = [.canJoinAllSpaces, .canJoinAllApplications, .stationary, .fullScreenAuxiliary, .ignoresCycle]
 
         let host = NSHostingView(rootView: OverlayView(model: model))
         host.frame = p.contentLayoutRect

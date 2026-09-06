@@ -24,7 +24,14 @@ protocol DictationDelegate: AnyObject {
 final class DictationEngine {
 
     weak var delegate: DictationDelegate?
-    private(set) var isRunning = false
+    private var lifecycle = DictationLifecycle()
+    var isRunning: Bool { lifecycle.phase == .running }
+    var isActive: Bool { lifecycle.isActive }
+    var canStart: Bool { lifecycle.phase == .idle }
+    private var startTask: Task<Void, Never>?
+    private var stopTask: Task<Void, Never>?
+    private var audioConfigurationObserver: NSObjectProtocol?
+    private var hasInputTap = false
 
     /// 入力レベル（0〜1 目安）。声が届いているかを目印に出すために使う
     var levelHandler: ((Float) -> Void)?
@@ -52,37 +59,52 @@ final class DictationEngine {
     // MARK: - 開始
 
     func start() {
-        guard !isRunning else { return }
-        Task { await startAsync() }
+        guard let token = lifecycle.begin() else { return }
+        notify(false, "マイクを確認中…（ESC で取り消し）")
+        startTask = Task { await startAsync(token: token) }
     }
 
-    private func startAsync() async {
-        notify(false, "マイクを確認中…")
+    private func checkCurrent(_ token: UInt64) throws {
+        guard !Task.isCancelled, lifecycle.accepts(token) else { throw CancellationError() }
+    }
 
-        Log.write("mic: 現在の状態 = \(AVCaptureDevice.authorizationStatus(for: .audio).rawValue)")
-        guard await requestMicrophone() else {
-            notify(false, "マイクの権限がありません")
-            return
-        }
-        let speechOK = await requestSpeechRecognition()
-        Log.write("speech: 認可 = \(speechOK)")
-
-        var hints: Set<DictationTranscriber.ContentHint> = []
-        if useFarField { hints.insert(.farField) }
-
-        let module = DictationTranscriber(
-            locale: locale,
-            contentHints: hints,
-            transcriptionOptions: [.punctuation],
-            reportingOptions: [.volatileResults, .frequentFinalization],
-            attributeOptions: [])
-        transcriber = module
-
+    private func startAsync(token: UInt64) async {
         do {
-            try await prepareAssets(for: [module])
+            try checkCurrent(token)
 
-            guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [module]) else {
-                notify(false, "音声フォーマットを取得できませんでした")
+            Log.write("mic: 現在の状態 = \(AVCaptureDevice.authorizationStatus(for: .audio).rawValue)")
+            let microphoneOK = await requestMicrophone()
+            try checkCurrent(token)
+            guard microphoneOK else {
+                stop(message: "マイクの権限がありません")
+                return
+            }
+            let speechOK = await requestSpeechRecognition()
+            try checkCurrent(token)
+            Log.write("speech: 認可 = \(speechOK)")
+            guard speechOK else {
+                stop(message: "音声認識の権限がありません")
+                return
+            }
+
+            var hints: Set<DictationTranscriber.ContentHint> = []
+            if useFarField { hints.insert(.farField) }
+
+            let module = DictationTranscriber(
+                locale: locale,
+                contentHints: hints,
+                transcriptionOptions: [.punctuation],
+                reportingOptions: [.volatileResults, .frequentFinalization],
+                attributeOptions: [])
+            transcriber = module
+
+            try await prepareAssets(for: [module], token: token)
+            try checkCurrent(token)
+
+            let availableFormat = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [module])
+            try checkCurrent(token)
+            guard let format = availableFormat else {
+                stop(message: "音声フォーマットを取得できませんでした")
                 return
             }
 
@@ -92,13 +114,12 @@ final class DictationEngine {
             let a = SpeechAnalyzer(modules: [module])
             analyzer = a
 
-            resultsTask = consume(module)
+            resultsTask = consume(module, token: token)
 
             try await a.start(inputSequence: stream)
-
-            try startAudio(to: format)
-
-            isRunning = true
+            try checkCurrent(token)
+            try startAudio(to: format, token: token)
+            guard lifecycle.didStart(token) else { throw CancellationError() }
             notify(true, "認識中")
 
             // 開始音は「**本当に聞ける状態になってから**」鳴らす。
@@ -111,17 +132,21 @@ final class DictationEngine {
             // 少し置くのは、無線イヤホンの切り替え（0.5秒ほど音が途切れる）を
             // やり過ごすため。マイクは既に動いているので、この間に喋っても取りこぼさない
             DispatchQueue.main.asyncAfter(deadline: .now() + DictationEngine.startSoundSettle) { [weak self] in
-                guard let self, self.isRunning else { return }
+                guard let self, self.lifecycle.accepts(token), self.isRunning else { return }
                 self.delegate?.dictationDidBeginCapturing()
             }
+        } catch is CancellationError {
+            // stop() が後始末を担当する。古い準備タスクから次の収録を触らない。
         } catch {
-            notify(false, "開始できませんでした: \(error.localizedDescription)")
-            await stopAsync()
+            guard lifecycle.accepts(token) else { return }
+            stop(message: "開始できませんでした: \(error.localizedDescription)")
         }
     }
 
-    private func prepareAssets(for modules: [any SpeechModule]) async throws {
-        switch await AssetInventory.status(forModules: modules) {
+    private func prepareAssets(for modules: [any SpeechModule], token: UInt64) async throws {
+        let status = await AssetInventory.status(forModules: modules)
+        try checkCurrent(token)
+        switch status {
         case .unsupported:
             throw NSError(domain: "nobetsu", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "日本語 (ja-JP) がこの構成では未対応です"])
@@ -130,42 +155,43 @@ final class DictationEngine {
         case .supported, .downloading:
             notify(false, "モデルを準備中…（初回のみ）")
             if let request = try await AssetInventory.assetInstallationRequest(supporting: modules) {
+                try checkCurrent(token)
                 try await request.downloadAndInstall()
+                try checkCurrent(token)
             }
         @unknown default:
             break
         }
+        try checkCurrent(token)
         _ = try? await AssetInventory.reserve(locale: locale)
     }
 
     // MARK: - 結果の購読
 
-    private func consume(_ module: DictationTranscriber) -> Task<Void, Never> {
+    private func consume(_ module: DictationTranscriber, token: UInt64) -> Task<Void, Never> {
         Task { [weak self] in
             do {
                 for try await result in module.results {
+                    guard let self, !Task.isCancelled, self.lifecycle.accepts(token) else { return }
                     let text = String(result.text.characters)
-                    let isFinal = result.isFinal
-                    await MainActor.run {
-                        guard let self else { return }
-                        if isFinal {
-                            self.delegate?.dictation(didFinalize: text)
-                        } else {
-                            self.delegate?.dictation(didUpdateVolatile: text)
-                        }
+                    if result.isFinal {
+                        self.delegate?.dictation(didFinalize: text)
+                    } else {
+                        self.delegate?.dictation(didUpdateVolatile: text)
                     }
                 }
+                guard let self, !Task.isCancelled, self.lifecycle.accepts(token) else { return }
+                self.stop(message: "音声認識が終了しました")
             } catch {
-                await MainActor.run {
-                    self?.notify(false, "認識が停止しました: \(error.localizedDescription)")
-                }
+                guard let self, !Task.isCancelled, self.lifecycle.accepts(token) else { return }
+                self.stop(message: "認識が停止しました: \(error.localizedDescription)")
             }
         }
     }
 
     // MARK: - オーディオ
 
-    private func startAudio(to analyzerFormat: AVAudioFormat) throws {
+    private func startAudio(to analyzerFormat: AVAudioFormat, token: UInt64) throws {
         let engine = AVAudioEngine()
         audioEngine = engine
 
@@ -192,21 +218,35 @@ final class DictationEngine {
                 cont?.yield(AnalyzerInput(buffer: converted))
             }
         }
+        hasInputTap = true
         engine.prepare()
         try engine.start()
+        audioConfigurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.lifecycle.accepts(token) else { return }
+                // 起動直後にも届く通知。これだけでは録音失敗と判断できない。
+                // 実際の認識エラーは consume() で停止・解放する。
+                Log.write("audio: 入出力構成の通知（エンジン稼働=\(self.audioEngine?.isRunning == true)）")
+            }
+        }
+
+        Log.write("audio: マイクを取得した")
     }
 
     /// マイクを完全に手放す。
     /// tap を外す → 停止 → reset → インスタンスを捨てる、まで揃えないと、
     /// macOS 標準の音声入力が「起動してすぐ切れる」状態になる
     private func releaseAudio() {
-        guard let engine = audioEngine else { return }
-        if engine.isRunning {
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
-        } else {
-            engine.inputNode.removeTap(onBus: 0)
+        if let observer = audioConfigurationObserver {
+            NotificationCenter.default.removeObserver(observer)
+            audioConfigurationObserver = nil
         }
+        guard let engine = audioEngine else { return }
+        if hasInputTap { engine.inputNode.removeTap(onBus: 0) }
+        hasInputTap = false
+        engine.stop()
         engine.reset()
         audioEngine = nil
         Log.write("audio: マイクを解放した")
@@ -257,29 +297,28 @@ final class DictationEngine {
 
     // MARK: - 停止
 
-    func stop() {
-        guard isRunning else { return }
-        Task { await stopAsync() }
-    }
-
-    private func stopAsync() async {
-        isRunning = false
-
-        // 何よりも先にマイクを返す。ここが遅れると他アプリの音声入力が壊れる
+    func stop(message: String = "待機中") {
+        guard let token = lifecycle.stop() else { return }
+        let preparation = startTask
+        startTask = nil
+        preparation?.cancel()
+        // await より前にマイクと共有リソースを解放する。
         releaseAudio()
-
         continuation?.finish()
         continuation = nil
-
-        if let a = analyzer {
-            try? await a.finalizeAndFinishThroughEndOfInput()
-        }
         resultsTask?.cancel()
         resultsTask = nil
+        let oldAnalyzer = analyzer
         analyzer = nil
         transcriber = nil
-
-        notify(false, "待機中")
+        notify(false, message == "待機中" ? "停止処理中…" : message)
+        stopTask = Task {
+            await oldAnalyzer?.cancelAndFinishNow()
+            await preparation?.value
+            lifecycle.didStop(token)
+            stopTask = nil
+            notify(false, message)
+        }
     }
 
     // MARK: - 権限
