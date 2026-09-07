@@ -11,7 +11,7 @@ enum DictionaryStorage {
             .appendingPathComponent("nobetsu", isDirectory: true)
     }
 
-    static func exists(_ url: URL) -> Bool {
+    static func hasEntry(_ url: URL) -> Bool {
         // fileExists は壊れたリンクを false にする。リンクも利用者のデータとして保護する。
         FileManager.default.fileExists(atPath: url.path)
             || (try? FileManager.default.destinationOfSymbolicLink(atPath: url.path)) != nil
@@ -19,7 +19,7 @@ enum DictionaryStorage {
 
     static func configuration(in directory: URL) throws -> Configuration {
         let url = directory.appendingPathComponent("dictionary-sources.json")
-        guard exists(url) else { return Configuration() }
+        guard hasEntry(url) else { return Configuration() }
         return try JSONDecoder().decode(Configuration.self, from: Data(contentsOf: url))
     }
 
@@ -34,7 +34,7 @@ enum DictionaryStorage {
     }
 
     static func createIfMissing(_ data: Data, at url: URL) throws {
-        guard !exists(url) else { return }
+        guard !hasEntry(url) else { return }
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
         // 確認後に別プロセスが作った場合も上書きしない。
@@ -42,61 +42,117 @@ enum DictionaryStorage {
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
+    /// 新しい退避が完成してから古い世代を削除する。作成途中のものを完成品に混ぜない。
+    private static func backup(in directory: URL, files: [(URL, Data)], links: [String: String],
+                               old: Data?, configuration: Data?) throws {
+        let fm = FileManager.default
+        let root = directory.appendingPathComponent("dictionary-backups", isDirectory: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true,
+                               attributes: [.posixPermissions: 0o700])
+        let id = UUID().uuidString
+        let pending = root.appendingPathComponent("." + id + ".partial")
+        let completed = root.appendingPathComponent(id)
+        try fm.createDirectory(at: pending, withIntermediateDirectories: false,
+                               attributes: [.posixPermissions: 0o700])
+        do {
+            for (index, file) in files.enumerated() {
+                try createIfMissing(file.1, at: pending.appendingPathComponent("personal-\(index).txt"))
+            }
+            if let old { try createIfMissing(old, at: pending.appendingPathComponent("previous-bundle.txt")) }
+            if let configuration {
+                try createIfMissing(configuration, at: pending.appendingPathComponent("dictionary-sources.json"))
+            }
+            try createIfMissing(try JSONEncoder().encode(files.map { $0.0.path }),
+                                at: pending.appendingPathComponent("sources.json"))
+            try createIfMissing(try JSONEncoder().encode(links),
+                                at: pending.appendingPathComponent("links.json"))
+            try fm.moveItem(at: pending, to: completed)
+        } catch {
+            try? fm.removeItem(at: pending)
+            throw error
+        }
+        // 旧版の UUID フォルダも対象。利用者が置いたファイルやリンクは刈り取らない。
+        let generations = try fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+            .compactMap { url -> (url: URL, date: Date)? in
+                guard UUID(uuidString: url.lastPathComponent) != nil else { return nil }
+                let attrs = try fm.attributesOfItem(atPath: url.path)
+                guard attrs[.type] as? FileAttributeType == .typeDirectory else { return nil }
+                return (url, attrs[.modificationDate] as? Date ?? .distantPast)
+            }
+            .sorted {
+                $0.date == $1.date ? $0.url.lastPathComponent > $1.url.lastPathComponent : $0.date > $1.date
+            }
+            .map(\.url)
+        // 時計が巻き戻っても今回のバックアップは残す。
+        for url in generations.filter({ $0 != completed }).dropFirst(4) {
+            try fm.removeItem(at: url)
+        }
+    }
+
     /// 設置前だけ実行。退避に失敗したら throw し、旧アプリを残す。
-    /// 旧同梱辞書だけに残る語彙も回収する。移行済みなら再取り込みしない。
+    /// 壊れた記録や消えたリンク先は保存場所を返し、既存データを変更せず更新を続ける。
+    @discardableResult
     static func prepare(in directory: URL, repositoryDictionary: URL,
-                        previousBundle: URL?, sample: URL) throws {
+                        previousBundle: URL?, sample: URL) throws -> [URL] {
         let fm = FileManager.default
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)
         let personal = directory.appendingPathComponent("dictionary.txt")
         let configURL = directory.appendingPathComponent("dictionary-sources.json")
-        let migrated = exists(configURL)
-        var config = try configuration(in: directory)
-        let repositoryExists = exists(repositoryDictionary)
+        let migrated = hasEntry(configURL)
+        var issues: [URL] = []
+        var links: [String: String] = [:]
+        // 保護対象の有無と、実体を読めるかは別。リンク自体も復旧用に記録する。
+        func snapshot(_ url: URL) throws -> Data? {
+            if let target = try? fm.destinationOfSymbolicLink(atPath: url.path) {
+                links[url.path] = target
+                if !fm.fileExists(atPath: url.path) {
+                    issues.append(url)
+                    return nil
+                }
+            }
+            return try Data(contentsOf: url)
+        }
+        let configData = migrated ? try snapshot(configURL) : nil
+        var config = Configuration()
+        if let configData {
+            do { config = try JSONDecoder().decode(Configuration.self, from: configData) }
+            catch { issues.append(configURL) }
+        }
+        let repositoryExists = hasEntry(repositoryDictionary)
         let old = try previousBundle.map { try Data(contentsOf: $0) }
         let sampleData = try Data(contentsOf: sample)
-
-        // 読めないファイル・壊れたリンクを空の辞書で置き換えない。
-        let active = unique((try legacyURLs(in: directory))
-            + (repositoryExists ? [repositoryDictionary] : []) + (exists(personal) ? [personal] : []))
-        let existing = active.filter { exists($0) }
-        let snapshots = try existing.map { try Data(contentsOf: $0) }
-        if !snapshots.isEmpty || old != nil {
-            let backup = directory.appendingPathComponent("dictionary-backups/" + UUID().uuidString)
-            try fm.createDirectory(at: backup, withIntermediateDirectories: true,
-                                   attributes: [.posixPermissions: 0o700])
-            for (index, data) in snapshots.enumerated() {
-                try createIfMissing(data, at: backup.appendingPathComponent("personal-\(index).txt"))
-            }
-            if let old { try createIfMissing(old, at: backup.appendingPathComponent("previous-bundle.txt")) }
-            // 復旧時に元の保存場所が分かる。これもローカルだけに保存する。
-            try createIfMissing(try JSONEncoder().encode(existing.map(\.path)),
-                                at: backup.appendingPathComponent("sources.json"))
+        let active = unique(config.legacyPaths.map { URL(fileURLWithPath: $0) }
+            + (repositoryExists ? [repositoryDictionary] : []) + (hasEntry(personal) ? [personal] : []))
+        var snapshots: [(URL, Data)] = []
+        for url in active {
+            guard hasEntry(url) else { issues.append(url); continue }
+            if let data = try snapshot(url) { snapshots.append((url, data)) }
         }
+        if !snapshots.isEmpty || old != nil || migrated || !links.isEmpty {
+            try backup(in: directory, files: snapshots, links: links, old: old, configuration: configData)
+        }
+        // 壊れた記録を初期化したり、移行済みの古い規則を再取り込みしたりしない。
+        guard issues.isEmpty else { return issues }
+        guard !migrated else { return [] }
 
         if repositoryExists {
-            if !exists(personal) {
-                try fm.createSymbolicLink(at: personal, withDestinationURL: repositoryDictionary)
+            if !hasEntry(personal) {
+                // 新規の引き継ぎはコピー。git clean で個人辞書の実体まで消えないようにする。
+                try createIfMissing(try Data(contentsOf: repositoryDictionary), at: personal)
             } else if personal.resolvingSymlinksInPath() != repositoryDictionary.resolvingSymlinksInPath() {
                 config.legacyPaths.append(repositoryDictionary.path)
             }
-        } else if !migrated, let old, old != sampleData {
-            if !exists(personal) {
+        } else if let old, old != sampleData {
+            if !hasEntry(personal) {
                 try createIfMissing(old, at: personal)
             } else {
-                // 個人辞書と旧同梱辞書が別物なら、どちらも残す。
-                // 利用者のファイルへ勝手にマージしない。メニューから別々に編集できる。
                 let recovered = directory.appendingPathComponent("legacy-dictionary-" + UUID().uuidString + ".txt")
                 try createIfMissing(old, at: recovered)
                 config.legacyPaths.append(recovered.path)
             }
         }
         config.legacyPaths = unique(config.legacyPaths.map { URL(fileURLWithPath: $0) }).map(\.path)
-        let encoded = try JSONEncoder().encode(config)
-        if migrated {
-            try encoded.write(to: configURL, options: .atomic)
-        } else {
-            try createIfMissing(encoded, at: configURL)
-        }
+        try createIfMissing(try JSONEncoder().encode(config), at: configURL)
+        return []
     }
 }

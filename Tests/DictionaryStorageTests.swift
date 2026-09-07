@@ -56,6 +56,13 @@ extension Tests {
             try prepare(newDir, newRepo)
             expect("リポジトリだけにある辞書をそのまま使える", try Data(contentsOf: newPersonal) == repoData, true)
             expect("元の辞書ファイルを移動しない", fm.fileExists(atPath: newRepo.path), true)
+            expect("新しい引き継ぎはリンクにしない", (try? fm.destinationOfSymbolicLink(atPath: newPersonal.path)) == nil, true)
+            try Data("編集済み => Edited\n".utf8).write(to: newPersonal)
+            try prepare(newDir, newRepo)
+            expect("再設置で元の辞書を読み込み先に戻さない", try DictionaryStorage.legacyURLs(in: newDir).count, 0)
+            try fm.removeItem(at: newRepo)
+            try prepare(newDir, newRepo)
+            expect("作業ツリーの辞書削除後も個人辞書を使える", try String(contentsOf: newPersonal, encoding: .utf8), "編集済み => Edited\n")
 
             let (recoverDir, absentRepo, recoveredPersonal) = try scenario("bundle-only")
             try prepare(recoverDir, absentRepo)
@@ -77,10 +84,9 @@ extension Tests {
             let (brokenDir, brokenRepo, brokenPersonal) = try scenario("broken-link")
             let missing = brokenDir.appendingPathComponent("missing.txt")
             try fm.createSymbolicLink(at: brokenPersonal, withDestinationURL: missing)
-            do {
-                try prepare(brokenDir, brokenRepo)
-                expect("壊れたリンクでは更新を中止", false, true)
-            } catch { expect("壊れたリンクでは更新を中止", true, true) }
+            let brokenIssues = try DictionaryStorage.prepare(in: brokenDir, repositoryDictionary: brokenRepo,
+                                                              previousBundle: old, sample: sample)
+            expect("壊れたリンクは保存先を案内して設置を続ける", brokenIssues, [brokenPersonal])
             try DictionaryStorage.createIfMissing(Data("template".utf8), at: brokenPersonal)
             expect("壊れたリンクを雛形で置換しない", try fm.destinationOfSymbolicLink(atPath: brokenPersonal.path), missing.path)
             expect("壊れたリンクの先にも雛形を作らない", fm.fileExists(atPath: missing.path), false)
@@ -95,11 +101,52 @@ extension Tests {
             let (corruptDir, corruptRepo, corruptPersonal) = try scenario("corrupt-config")
             try personalData.write(to: corruptPersonal)
             try Data("invalid".utf8).write(to: corruptDir.appendingPathComponent("dictionary-sources.json"))
-            do {
-                try prepare(corruptDir, corruptRepo)
-                expect("壊れた移行記録を黙って初期化しない", false, true)
-            } catch { expect("壊れた移行記録を黙って初期化しない", true, true) }
+            let corruptConfig = corruptDir.appendingPathComponent("dictionary-sources.json")
+            let corruptIssues = try DictionaryStorage.prepare(in: corruptDir, repositoryDictionary: corruptRepo,
+                                                               previousBundle: old, sample: sample)
+            expect("壊れた移行記録は保存先を案内して設置を続ける", corruptIssues, [corruptConfig])
+            expect("壊れた移行記録を黙って初期化しない", try String(contentsOf: corruptConfig, encoding: .utf8), "invalid")
             expect("移行失敗でも辞書を保持", try Data(contentsOf: corruptPersonal) == personalData, true)
+            let corruptBackups = try fm.contentsOfDirectory(at: corruptDir.appendingPathComponent("dictionary-backups"), includingPropertiesForKeys: nil)
+            expect("壊れた移行記録も原文で退避", try String(contentsOf: corruptBackups[0].appendingPathComponent("dictionary-sources.json"), encoding: .utf8), "invalid")
+            expect("壊れた移行記録から旧同梱規則を再取り込みしない",
+                   try fm.contentsOfDirectory(atPath: corruptDir.path).contains { $0.hasPrefix("legacy-dictionary-") }, false)
+
+            let (freshDir, freshRepo, freshPersonal) = try scenario("fresh")
+            try DictionaryStorage.prepare(in: freshDir, repositoryDictionary: freshRepo, previousBundle: nil, sample: sample)
+            try DictionaryStorage.createIfMissing(personalData, at: freshPersonal)
+            expect("新規利用者の辞書は通常ファイル", (try? fm.destinationOfSymbolicLink(atPath: freshPersonal.path)) == nil, true)
+
+            let backupRoot = dir.appendingPathComponent("dictionary-backups")
+            let firstBackups = backups
+            for index in 0..<6 {
+                try Data("世代 => Generation-\(index)\n".utf8).write(to: personal)
+                try prepare(dir, repo)
+                let generations = try fm.contentsOfDirectory(at: backupRoot, includingPropertiesForKeys: nil)
+                expect("バックアップは最大5世代（\(index)）", generations.count <= 5, true)
+            }
+            expect("最古の退避を削除", firstBackups.allSatisfy { !fm.fileExists(atPath: $0.path) }, true)
+            let latest = try fm.contentsOfDirectory(at: backupRoot, includingPropertiesForKeys: nil)
+                .flatMap { try fm.contentsOfDirectory(at: $0, includingPropertiesForKeys: nil) }
+            expect("最新の内容を復元できる", latest.contains { (try? String(contentsOf: $0, encoding: .utf8)) == "世代 => Generation-5\n" }, true)
+            expect("現行の辞書を世代整理で消さない", try String(contentsOf: personal, encoding: .utf8), "世代 => Generation-5\n")
+
+            // UUID の名前でもリンクは刈り取らない。リンク先の別フォルダにも触れない。
+            let external = root.appendingPathComponent("external")
+            try fm.createDirectory(at: external, withIntermediateDirectories: true)
+            let backupLink = backupRoot.appendingPathComponent(UUID().uuidString)
+            try fm.createSymbolicLink(at: backupLink, withDestinationURL: external)
+            try prepare(dir, repo)
+            expect("バックアップ内に利用者が置いたリンクを保持", try fm.destinationOfSymbolicLink(atPath: backupLink.path), external.path)
+
+            let preserved = try fm.contentsOfDirectory(atPath: backupRoot.path).sorted()
+            try fm.removeItem(at: personal)
+            try fm.createDirectory(at: personal, withIntermediateDirectories: false)
+            do {
+                try prepare(dir, repo)
+                expect("実体の退避失敗なら設置を止める", false, true)
+            } catch { expect("実体の退避失敗なら設置を止める", true, true) }
+            expect("退避失敗では古い世代を削除しない", try fm.contentsOfDirectory(atPath: backupRoot.path).sorted() == preserved, true)
         } catch {
             expect("辞書引き継ぎテストが完了する", String(describing: error), "success")
         }

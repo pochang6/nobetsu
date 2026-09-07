@@ -17,6 +17,7 @@ struct Tests {
     nonisolated(unsafe) static var failures = 0
     nonisolated(unsafe) static var count = 0
 
+    @MainActor
     static func main() {
         parse()
         build()
@@ -27,6 +28,7 @@ struct Tests {
         triggerSettings()
         archive()
         dictionaryStorage()
+        dictionaryLoading()
         dictationLifecycle()
         indicatorPlacement()
 

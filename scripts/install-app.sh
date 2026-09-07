@@ -8,7 +8,7 @@ stop_app() {
     if ! app_is_running; then return 0; fi
     sleep 0.25
   done
-  echo "旧アプリの終了を確認できないため、入れ替えを中止します。" >&2
+  echo "アプリの終了を確認できませんでした。" >&2
   return 1
 }
 start_app() { open -n "$1"; }
@@ -34,21 +34,38 @@ install_app() (
   cleanup() {
     local status=$?
     trap - EXIT
+    set +e
     if [ "$committed" = 0 ]; then
       if [ "$replaced" = 1 ]; then
-        stop_app
-        rm -rf "$installed"
+        if ! stop_app; then
+          echo "更新を中止しましたが、新しいアプリを終了できないため復元できません。" >&2
+          if [ "$previous" = 1 ]; then
+            echo "アプリを終了してから旧版を戻してください。退避先を残します: $stage/previous.app" >&2
+          else
+            echo "設置したアプリを残します: $installed" >&2
+          fi
+          exit 1
+        fi
+        if ! rm -rf "$installed"; then
+          echo "新しいアプリを取り除けないため復元できません。退避先を残します: $stage" >&2
+          exit 1
+        fi
       fi
       if [ "$previous" = 1 ]; then
         if ! mv "$stage/previous.app" "$installed"; then
           echo "旧アプリの復元に失敗しました。退避先を残します: $stage/previous.app" >&2
           exit 1
         fi
-        if [ "$was_running" = 1 ]; then start_app "$installed" || true; fi
+        if [ "$was_running" = 1 ] && ! start_app "$installed"; then
+          echo "旧アプリを戻しましたが、再起動できませんでした: $installed" >&2
+        fi
         echo "更新を中止し、旧アプリへ戻しました。" >&2
       fi
     fi
-    rm -rf "$stage"
+    if ! rm -rf "$stage"; then
+      echo "更新用の一時フォルダを削除できませんでした: $stage" >&2
+      exit 1
+    fi
     exit "$status"
   }
   trap cleanup EXIT

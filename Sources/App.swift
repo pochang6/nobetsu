@@ -9,6 +9,8 @@ final class Controller: ObservableObject {
     @Published private(set) var isRunning = false
     @Published private(set) var isActive = false
     @Published private(set) var status = "待機中"
+    /// 読めない辞書の保存先と対処。読めた規則はそのまま使う。
+    @Published private(set) var dictionaryIssues: [PhraseBook.ReadIssue] = []
     /// 許可が足りていない。メニューバーのアイコンに警告を出すために持つ
     @Published private(set) var needsPermission = true
     /// 許可が足りていないときに、メニューへ出す案内。
@@ -132,6 +134,7 @@ final class Controller: ObservableObject {
 
     func bootstrap() {
         Log.startSession()
+        reloadDictionary()
         // アクセシビリティの判定より先に入力監視を扱う。
         // AXIsProcessTrusted() を先に呼ぶと入力監視の要求が通らなくなる既知の不具合がある
         Log.write("bootstrap: v\(NobetsuApp.version) / 入力監視 \(Permissions.inputMonitoringStatusText) / 署名 \(Permissions.signingSummary)")
@@ -263,7 +266,7 @@ final class Controller: ObservableObject {
         committed = ""
         autoStopReason = nil
         // 辞書は「喋りはじめる瞬間」に読む。書き換えたら、次のひと言から効く
-        phrases.reloadIfNeeded()
+        reloadDictionary()
         injector.beginSession()
         focusWatcher.start()
         engine.start()
@@ -359,6 +362,7 @@ final class Controller: ObservableObject {
     /// 辞書を読み直す。喋りはじめるたびに自動で読むので、普段は使わなくてよい
     func reloadDictionary() {
         phrases.reload()
+        dictionaryIssues = phrases.issues
     }
 
     /// 認識をやめて、目印も閉じる。ESC・⌘・× のときの動き
@@ -630,6 +634,17 @@ struct NobetsuApp: App {
 
             Divider()
 
+            if !controller.dictionaryIssues.isEmpty {
+                Text("一部の辞書を読み込めません（読めた規則は使用中）")
+                ForEach(controller.dictionaryIssues) { issue in
+                    Button(issue.title) {
+                        NSWorkspace.shared.selectFile(issue.url.path,
+                            inFileViewerRootedAtPath: issue.url.deletingLastPathComponent().path)
+                    }
+                    Text(issue.reason)
+                }
+                Divider()
+            }
             Button("辞書を編集する") { controller.editDictionary() }
             Button("辞書を読み直す") { controller.reloadDictionary() }
             Button("引き継いだ辞書・バックアップを開く") {
@@ -654,7 +669,7 @@ struct NobetsuApp: App {
     }
 
     private var iconName: String {
-        if controller.needsPermission { return "exclamationmark.triangle.fill" }
+        if controller.needsPermission || !controller.dictionaryIssues.isEmpty { return "exclamationmark.triangle.fill" }
         return controller.isRunning ? "waveform.circle.fill" : "waveform"
     }
 }

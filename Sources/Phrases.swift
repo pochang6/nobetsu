@@ -17,11 +17,27 @@ final class PhraseBook {
     typealias Rule = (from: String, to: String)
 
     private(set) var rules: [Rule] = []
-    /// 直近に読み込んだファイルとその更新時刻。中身が変わっていなければ読み直さない
-    private var stamps: [URL: Date] = [:]
+    struct ReadIssue: Identifiable, Equatable {
+        let url: URL
+        let reason: String
+        var id: URL { url }
+        var title: String { "読めません: " + (url.path as NSString).abbreviatingWithTildeInPath }
+    }
+
+    private(set) var issues: [ReadIssue] = []
+    private let directory: URL
+    private let sampleURL: URL?
+    private let writeLog: (String) -> Void
+
+    init(directory: URL = DictionaryStorage.directory, bundledURL: URL? = PhraseBook.bundledURL,
+         writeLog: @escaping (String) -> Void = Log.write) {
+        self.directory = directory
+        self.sampleURL = bundledURL
+        self.writeLog = writeLog
+    }
 
     /// 同梱辞書（アプリの中）
-    static var bundledURL: URL? {
+    nonisolated static var bundledURL: URL? {
         Bundle.main.url(forResource: "dictionary", withExtension: "txt")
     }
 
@@ -32,50 +48,41 @@ final class PhraseBook {
 
     // MARK: - 読み込み
 
-    private func files() throws -> [URL] {
-        DictionaryStorage.unique([PhraseBook.bundledURL].compactMap { $0 }
-            + (try DictionaryStorage.legacyURLs(in: DictionaryStorage.directory))
-            + [PhraseBook.personalURL])
-    }
-
-    func reloadIfNeeded() {
-        do {
-            let files = try files()
-            var nextStamps: [URL: Date] = [:]
-            for url in files where DictionaryStorage.exists(url) {
-                let path = url.resolvingSymlinksInPath().path
-                let attrs = try FileManager.default.attributesOfItem(atPath: path)
-                nextStamps[url] = attrs[.modificationDate] as? Date
-            }
-            guard stamps != nextStamps || rules.isEmpty else { return }
-            try load(files)
-            stamps = nextStamps
-        } catch {
-            // 読めないときは最後に読めた辞書を維持する。中身・個人パスはログへ渡さない。
-            Log.write("phrases: 辞書を読み込めないため直前の規則を維持した。保存先・リンク先を確認してください")
-        }
-    }
-
+    /// 開始時にファイルごとに読む。失敗したファイルの古い規則は残さず、読めた規則を使う。
+    /// 更新時刻だけのキャッシュは使わない。同じ時刻での保存やリンク先の復旧も次回に反映する。
     func reload() {
-        stamps = [:]
-        reloadIfNeeded()
-    }
-
-    private func load(_ files: [URL]) throws {
+        var nextIssues: [ReadIssue] = []
+        var legacy: [URL] = []
+        do {
+            legacy = try DictionaryStorage.legacyURLs(in: directory)
+        } catch {
+            nextIssues.append(ReadIssue(url: directory.appendingPathComponent("dictionary-sources.json"),
+                reason: "引き継ぎ記録を読めません。JSON の書式・権限・リンク先を確認してください。読める同梱辞書と個人辞書は使えます。"))
+        }
+        let personal = directory.appendingPathComponent("dictionary.txt")
+        // 個人辞書の未作成は正常。登録済みの旧辞書の消失や壊れたリンクは案内する。
+        let files = DictionaryStorage.unique([sampleURL].compactMap { $0 } + legacy
+            + (DictionaryStorage.hasEntry(personal) ? [personal] : []))
         var pairs: [Rule] = []
         var counts: [String] = []
-        for (index, url) in files.enumerated() where DictionaryStorage.exists(url) {
-            let text = try String(contentsOf: url, encoding: .utf8)
-            let parsed = PhraseBook.parse(text)
-            pairs.append(contentsOf: parsed)
-            counts.append("辞書\(index + 1)=\(parsed.count)")
+        for (index, url) in files.enumerated() {
+            do {
+                let parsed = PhraseBook.parse(try String(contentsOf: url, encoding: .utf8))
+                pairs.append(contentsOf: parsed)
+                counts.append("辞書\(index + 1)=\(parsed.count)")
+            } catch {
+                nextIssues.append(ReadIssue(url: url,
+                    reason: "保存先・リンク先・読み取り権限・UTF-8 の文字コードを確認してください。このファイル以外の読める辞書は使えます。"))
+            }
         }
         let built = PhraseBook.build(from: pairs)
         rules = built.rules
+        issues = nextIssues
         if !built.rejected.isEmpty {
-            Log.write("phrases: 左辺が右辺に含まれる規則を \(built.rejected.count) 件除外した")
+            writeLog("phrases: 左辺が右辺に含まれる規則を \(built.rejected.count) 件除外した")
         }
-        Log.write("phrases: 辞書を読み込んだ \(rules.count) 件 [\(counts.joined(separator: " "))]")
+        // 規則・個人のパスはログに書かず、問題の保存先はメニューへ出す。
+        writeLog("phrases: 辞書を読み込んだ \(rules.count) 件 [\(counts.joined(separator: " "))] / 読めないファイル \(issues.count) 件（詳細はメニュー）")
     }
 
     /// 読み込んだ組を、当てられる形に整える。

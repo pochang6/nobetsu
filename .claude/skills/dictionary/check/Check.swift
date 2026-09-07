@@ -40,8 +40,8 @@ struct Check {
                 let repo = URL(fileURLWithPath: "dictionary.txt")
                 let urls = [URL(fileURLWithPath: "dictionary.sample.txt")]
                     + (try DictionaryStorage.legacyURLs(in: DictionaryStorage.directory))
-                    + (DictionaryStorage.exists(repo) ? [repo] : []) + [personal]
-                paths = DictionaryStorage.unique(urls).filter { DictionaryStorage.exists($0) }.map(\.path)
+                    + (DictionaryStorage.hasEntry(repo) ? [repo] : []) + [personal]
+                paths = DictionaryStorage.unique(urls).filter { DictionaryStorage.hasEntry($0) }.map(\.path)
             } catch {
                 print("❌ 辞書の引き継ぎ記録を読めません。保存フォルダを確認してください。")
                 exit(1)

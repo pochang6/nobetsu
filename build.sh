@@ -109,7 +109,8 @@ fi
 # 同時更新で辞書の引き継ぎやアプリの退避先が競合しないようにする。
 LOCK="/tmp/nobetsu-install-$(id -u).lock"
 if ! mkdir "$LOCK" 2>/dev/null; then
-  echo "別の更新が進行中です。終了を待ってからやり直してください: $LOCK" >&2
+  echo "別の更新が進行中、または前回のロックが残っています: $LOCK" >&2
+  echo "他の build.sh / update.sh が動いていないことを確認したら、rmdir \"$LOCK\" で解除して再実行できます。" >&2
   exit 1
 fi
 trap 'rmdir "$LOCK"' EXIT
