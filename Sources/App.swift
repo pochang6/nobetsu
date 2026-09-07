@@ -327,6 +327,10 @@ final class Controller: ObservableObject {
                      action: #selector(menuEditDictionary), keyEquivalent: "")
             .target = self
 
+        let screenItem = NSMenuItem(title: "目印を出す画面", action: nil, keyEquivalent: "")
+        menu.addItem(screenItem)
+        menu.setSubmenu(buildIndicatorScreenMenu(), for: screenItem)
+
         menu.addItem(withTitle: "この目印の位置を初期状態に戻す",
                      action: #selector(menuResetPosition), keyEquivalent: "")
             .target = self
@@ -340,6 +344,40 @@ final class Controller: ObservableObject {
                                  accessibilityDescription: "音声入力を止める")
 
         return menu
+    }
+
+    private func buildIndicatorScreenMenu() -> NSMenu {
+        let menu = NSMenu()
+        let automatic = menu.addItem(withTitle: "入力欄の画面へ自動で移動",
+                                     action: #selector(menuAutomaticIndicatorScreen), keyEquivalent: "")
+        automatic.target = self
+        automatic.state = indicator.fixedScreen == nil ? .on : .off
+        let current = menu.addItem(withTitle: "この画面に固定",
+                                   action: #selector(menuPinCurrentIndicatorScreen), keyEquivalent: "")
+        current.target = self
+        current.isEnabled = indicator.canPinCurrentScreen
+        menu.addItem(.separator())
+        let choices = indicator.screenChoices
+        for (index, choice) in choices.enumerated() {
+            let item = menu.addItem(withTitle: "\(index + 1): \(choice.name) に固定",
+                                    action: #selector(menuPinIndicatorScreen(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = choice.id
+            item.state = indicator.fixedScreen?.id == choice.id ? .on : .off
+        }
+        if let fixed = indicator.fixedScreen, !choices.contains(where: { $0.id == fixed.id }) {
+            menu.addItem(.separator())
+            menu.addItem(withTitle: "固定先: \(fixed.name)（未接続）", action: nil, keyEquivalent: "")
+            menu.addItem(withTitle: "接続するまでは入力欄の画面へ自動で移動します", action: nil, keyEquivalent: "")
+        }
+        return menu
+    }
+
+    @objc private func menuAutomaticIndicatorScreen() { indicator.useAutomaticScreen() }
+    @objc private func menuPinCurrentIndicatorScreen() { indicator.pinCurrentScreen() }
+    @objc private func menuPinIndicatorScreen(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        indicator.pinScreen(id: id)
     }
 
     @objc private func menuStop() { stop() }

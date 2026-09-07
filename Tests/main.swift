@@ -32,6 +32,7 @@ struct Tests {
         dictationLifecycle()
         indicatorPlacement()
         indicatorScreenSelection()
+        indicatorScreenPreference()
 
         print("")
         if failures == 0 {

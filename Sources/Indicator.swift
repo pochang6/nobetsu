@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import ColorSync
 
 /// 認識中であることを知らせる小さな目印。
 ///
@@ -179,6 +180,54 @@ final class IndicatorController {
         reposition()
     }
 
+    private let preferences: UserDefaults
+    private(set) var fixedScreen: IndicatorScreenPreference?
+
+    init(preferences: UserDefaults = .standard) {
+        self.preferences = preferences
+        self.fixedScreen = IndicatorScreenPreference.load(from: preferences)
+    }
+
+    private static func screenID(_ screen: NSScreen) -> String? {
+        guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
+              let uuid = CGDisplayCreateUUIDFromDisplayID(number.uint32Value)?.takeRetainedValue(),
+              let string = CFUUIDCreateString(nil, uuid) else { return nil }
+        return string as String
+    }
+
+    var screenChoices: [IndicatorScreenPreference] {
+        NSScreen.screens.compactMap { screen in
+            Self.screenID(screen).map { IndicatorScreenPreference(id: $0, name: screen.localizedName) }
+        }
+    }
+
+    var canPinCurrentScreen: Bool {
+        guard let panel, panel.isVisible, let screen = panel.screen else { return false }
+        return Self.screenID(screen) != nil
+    }
+
+    func pinCurrentScreen() {
+        guard let screen = panel?.screen, let id = Self.screenID(screen) else { return }
+        pinScreen(id: id)
+    }
+
+    func pinScreen(id: String) {
+        // メニューを開いた後に外された画面は固定しない。
+        guard let choice = screenChoices.first(where: { $0.id == id }) else { return }
+        fixedScreen = choice
+        IndicatorScreenPreference.save(choice, to: preferences)
+        reposition()
+        Log.write("indicator: 表示する画面を固定した")
+    }
+
+    func useAutomaticScreen() {
+        fixedScreen = nil
+        IndicatorScreenPreference.save(nil, to: preferences)
+        lastScreenNumber = nil
+        reposition()
+        Log.write("indicator: 表示する画面の固定を解除した")
+    }
+
     // MARK: - 組み立て
 
     private func build() {
@@ -256,8 +305,11 @@ final class IndicatorController {
     /// 情報が欠けた間は直前の画面、初回はマウスのいる画面を使う。
     private func currentScreen() -> NSScreen? {
         let screens = NSScreen.screens
+        // 固定先が未接続なら自動選択。設定は消さず、再接続したら同じモニターへ戻る。
+        let preferred = fixedScreen?.index(in: screens.map(Self.screenID))
         if let index = IndicatorPlacement.screenIndex(screens: screens.map(\.frame),
-                                                       input: inputFrame, window: targetWindowFrame) {
+                                                       input: inputFrame, window: targetWindowFrame,
+                                                       preferredIndex: preferred) {
             let screen = screens[index]
             lastScreenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
             return screen

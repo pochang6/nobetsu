@@ -24,6 +24,7 @@ swiftc \
   Sources/Trigger.swift \
   Sources/DictationLifecycle.swift \
   Sources/IndicatorPlacement.swift \
+  Sources/IndicatorScreenPreference.swift \
   Sources/Log.swift \
   Tests/main.swift Tests/DictionaryStorageTests.swift Tests/PhraseBookTests.swift Tests/IndicatorPlacementTests.swift \
   -o "$OUT"

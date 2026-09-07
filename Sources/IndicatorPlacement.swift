@@ -8,7 +8,8 @@ enum IndicatorPlacement {
     }
 
     /// 画面と対象はすべて AppKit 座標。重なりがなければ呼び出し側で予備の画面を選ぶ。
-    static func screenIndex(screens: [CGRect], input: CGRect?, window: CGRect?) -> Int? {
+    static func screenIndex(screens: [CGRect], input: CGRect?, window: CGRect?, preferredIndex: Int? = nil) -> Int? {
+        if let preferredIndex, screens.indices.contains(preferredIndex) { return preferredIndex }
         func usable(_ frame: CGRect?) -> CGRect? {
             guard let frame, !frame.isNull, !frame.isEmpty,
                   frame.origin.x.isFinite, frame.origin.y.isFinite,
