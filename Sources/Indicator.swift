@@ -252,19 +252,15 @@ final class IndicatorController {
     /// `NSScreen.main` は「自分のキーウィンドウがある画面」なので、
     /// キーウィンドウを持たないこのアプリでは常にメインを指してしまう。
     ///
-    /// マウスのいる画面を使う。喋りはじめる直前に入力欄を押しているので、
-    /// たいていそこが作業している画面になる
+    /// 入力欄をウィンドウ内に切り詰め、重なりが最大の画面を選ぶ。
+    /// 情報が欠けた間は直前の画面、初回はマウスのいる画面を使う。
     private func currentScreen() -> NSScreen? {
-        if let target = inputFrame ?? targetWindowFrame {
-            let screen = NSScreen.screens.max { a, b in
-                let left = a.frame.intersection(target)
-                let right = b.frame.intersection(target)
-                return (left.isNull ? 0 : left.width * left.height) < (right.isNull ? 0 : right.width * right.height)
-            }
-            if let screen, screen.frame.intersects(target) {
-                lastScreenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
-                return screen
-            }
+        let screens = NSScreen.screens
+        if let index = IndicatorPlacement.screenIndex(screens: screens.map(\.frame),
+                                                       input: inputFrame, window: targetWindowFrame) {
+            let screen = screens[index]
+            lastScreenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+            return screen
         }
         // AX の一時的な欠落でマウス側の画面へ飛ばない。
         if let lastScreenNumber, let screen = NSScreen.screens.first(where: {

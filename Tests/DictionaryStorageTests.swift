@@ -123,13 +123,35 @@ extension Tests {
                 try Data("世代 => Generation-\(index)\n".utf8).write(to: personal)
                 try prepare(dir, repo)
                 let generations = try fm.contentsOfDirectory(at: backupRoot, includingPropertiesForKeys: nil)
-                expect("バックアップは最大5世代（\(index)）", generations.count <= 5, true)
+                expect("バックアップは5世代まで増えて維持される（\(index)）", generations.count, min(index + 3, 5))
             }
             expect("最古の退避を削除", firstBackups.allSatisfy { !fm.fileExists(atPath: $0.path) }, true)
             let latest = try fm.contentsOfDirectory(at: backupRoot, includingPropertiesForKeys: nil)
                 .flatMap { try fm.contentsOfDirectory(at: $0, includingPropertiesForKeys: nil) }
             expect("最新の内容を復元できる", latest.contains { (try? String(contentsOf: $0, encoding: .utf8)) == "世代 => Generation-5\n" }, true)
             expect("現行の辞書を世代整理で消さない", try String(contentsOf: personal, encoding: .utf8), "世代 => Generation-5\n")
+
+            let (futureDir, futureRepo, futurePersonal) = try scenario("future-backups")
+            try personalData.write(to: futurePersonal)
+            let futureRoot = futureDir.appendingPathComponent("dictionary-backups")
+            var futureNames = Set<String>()
+            for _ in 0..<4 {
+                let name = UUID().uuidString
+                let generation = futureRoot.appendingPathComponent(name, isDirectory: true)
+                try fm.createDirectory(at: generation, withIntermediateDirectories: true)
+                try fm.setAttributes([.modificationDate: Date(timeIntervalSince1970: 4_102_444_800)],
+                                     ofItemAtPath: generation.path)
+                futureNames.insert(name)
+            }
+            try prepare(futureDir, futureRepo)
+            let afterFuture = try fm.contentsOfDirectory(at: futureRoot, includingPropertiesForKeys: nil)
+            let created = afterFuture.filter { !futureNames.contains($0.lastPathComponent) }
+            expect("既存4世代が未来日時でも合計5世代を残す", afterFuture.count, 5)
+            expect("時計が巻き戻っても今回の退避を残す", created.count, 1)
+            if let latest = created.first {
+                expect("今回の辞書を退避から復元できる",
+                       try Data(contentsOf: latest.appendingPathComponent("personal-0.txt")) == personalData, true)
+            }
 
             // UUID の名前でもリンクは刈り取らない。リンク先の別フォルダにも触れない。
             let external = root.appendingPathComponent("external")

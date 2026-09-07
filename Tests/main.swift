@@ -31,6 +31,7 @@ struct Tests {
         dictionaryLoading()
         dictationLifecycle()
         indicatorPlacement()
+        indicatorScreenSelection()
 
         print("")
         if failures == 0 {

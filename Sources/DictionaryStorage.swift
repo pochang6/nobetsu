@@ -83,8 +83,9 @@ enum DictionaryStorage {
                 $0.date == $1.date ? $0.url.lastPathComponent > $1.url.lastPathComponent : $0.date > $1.date
             }
             .map(\.url)
+        // 列挙したディレクトリURLは末尾スラッシュが付くため、UUID名で今回分を除外する。
         // 時計が巻き戻っても今回のバックアップは残す。
-        for url in generations.filter({ $0 != completed }).dropFirst(4) {
+        for url in generations.filter({ $0.lastPathComponent != id }).dropFirst(4) {
             try fm.removeItem(at: url)
         }
     }
