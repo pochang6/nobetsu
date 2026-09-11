@@ -25,6 +25,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     init(controller: Controller) {
         self.controller = controller
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem.autosaveName = "nobetsu"
         super.init()
 
         let menu = NSMenu()
@@ -58,6 +59,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         let image = NSImage(systemSymbolName: name, accessibilityDescription: "nobetsu")
         image?.setName(name)
         statusItem.button?.image = image
+        Log.write("statusbar: アイコン \(name) image=\(image == nil ? "nil" : "ok") button=\(statusItem.button == nil ? "nil" : "ok") visible=\(statusItem.isVisible) length=\(statusItem.length)")
     }
 
     // MARK: - メニュー

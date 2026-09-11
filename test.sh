@@ -6,7 +6,10 @@ cd "$(dirname "$0")"
 # 副作用を持たない部分だけを取り出して確かめる。
 # マイクもイベントタップも他アプリへの打ち込みも使わないので、
 # アプリを起動せずに走ります。App.swift を含めないのは @main が衝突するため
-SDK="$(xcrun --show-sdk-path)"
+# SDK は -target と同じ版に合わせる（理由は build.sh の SDK の項を参照）
+MACOS_MAJOR=26
+SDK="${SDKROOT:-$(dirname "$(xcrun --show-sdk-path)")/MacOSX${MACOS_MAJOR}.sdk}"
+[ -d "$SDK" ] || SDK="$(xcrun --show-sdk-path)"
 TEST_BUILD_DIR="$(mktemp -d)"
 trap 'rm -rf "$TEST_BUILD_DIR"' EXIT
 OUT="$TEST_BUILD_DIR/nobetsu-tests"

@@ -8,7 +8,16 @@ BUNDLE_ID="dev.pochang6.nobetsu"
 VERSION="$(cat VERSION 2>/dev/null || echo 0.0.0)"
 BUILD_DIR="build"
 APP="$BUILD_DIR/$APP_NAME.app"
-SDK="$(xcrun --show-sdk-path)"
+# SDK は配置先の macOS の版（下の -target と同じ 26）に合わせて選ぶ。
+# xcrun の既定は「いちばん新しい SDK」で、コマンドラインツールの更新で次の版の
+# ベータ SDK に黙って切り替わる。そちらには SwiftUI のマクロ実装が同梱されておらず、
+# `@State` のある行で「plugin for module 'SwiftUIMacros' not found」と落ちる
+# （2026-09 に MacOSX27.0.sdk へ切り替わって実際に起きた）。
+# 版を明示しておけば更新で勝手に変わらない。SDKROOT が指定されていればそれを優先し、
+# その版の SDK が無ければ従来どおり xcrun の既定に戻す
+MACOS_MAJOR=26
+SDK="${SDKROOT:-$(dirname "$(xcrun --show-sdk-path)")/MacOSX${MACOS_MAJOR}.sdk}"
+[ -d "$SDK" ] || SDK="$(xcrun --show-sdk-path)"
 MODE="${1:-}"
 case "$MODE" in
   ""|--check|--build-only|--restart) ;;

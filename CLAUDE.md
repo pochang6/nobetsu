@@ -388,6 +388,7 @@ macOS では使えない）ので、メニューバーは `MenuBarExtra` では�
 | ⌘ 長押しに反応しない | ログの `trigger:` 行。許可の状態が出る |
 | 許可のダイアログが出ない | ログの `署名` が `adhoc`。`./build.sh --check` を見る |
 | ビルドが設置まで進まない | 証明書が無い。`./build.sh --check` の言い分どおりに直す |
+| ビルドが `SwiftUIMacros` `not found` で落ちる | SDK が新しすぎる。`build.sh` は `MACOS_MAJOR` の版の SDK を選ぶが、無ければ既定（最新）に落ちる。`ls $(dirname $(xcrun --show-sdk-path))` |
 | 文字が入らない | アクセシビリティの許可。ログの `start:` 行 |
 | 音が鳴らない | ログの `sound:` 行。無線イヤホンは接続切替で音が途切れる |
 | 文字が重複する / 消える | `Injector.swift` の区間管理。`accepting` と `discardCurrentSpan` |
