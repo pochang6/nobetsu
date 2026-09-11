@@ -1,5 +1,4 @@
 import AppKit
-import SwiftUI
 import Combine
 
 /// メニューバーのアイコンとメニュー。
@@ -9,12 +8,9 @@ import Combine
 /// もう一度開いて確かめることになり、切り替えた実感が持てない。
 /// macOS の SwiftUI には閉じないようにする手段が無い
 /// （`menuActionDismissBehavior(.disabled)` は macOS では使えない）ので、
-/// AppKit の `NSMenu` に組み替え、チェック項目だけ自前のビューに載せている。
-/// `NSMenuItem.view` の中で起きたクリックはメニューを閉じない
+/// AppKit の `NSMenu` に組み替え、チェック項目だけ自前のビュー（`StickyMenuItemView`）に
+/// 載せている。`NSMenuItem.view` の中で起きたクリックはメニューを閉じない
 /// （目印のメニューにある長押し時間のスライダーと同じ仕組み）。
-///
-/// 代わりに、自前のビューの項目はマウスを載せても反転せず、矢印キーでも選べない。
-/// チェックボックスは見ただけで押せると分かるので、そこは受け入れている。
 @MainActor
 final class StatusMenu: NSObject, NSMenuDelegate {
 
@@ -30,6 +26,9 @@ final class StatusMenu: NSObject, NSMenuDelegate {
 
         let menu = NSMenu()
         menu.delegate = self
+        // action の無い項目を AppKit に無効化させない（チェック項目は view だけで action を持たない）。
+        // 代わりに説明だけの行は label() で明示的に無効にする
+        menu.autoenablesItems = false
         statusItem.menu = menu
         updateIcon()
 
@@ -165,9 +164,11 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         String(format: "%.1f", seconds)
     }
 
-    /// 押せない説明だけの行
+    /// 押せない説明だけの行。autoenablesItems を切っているので自分で無効にする
     private func label(_ title: String) -> NSMenuItem {
-        NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        return item
     }
 
     private func button(_ title: String, _ action: Selector) -> NSMenuItem {
@@ -202,37 +203,126 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     @objc private func quit() { NSApp.terminate(nil) }
 }
 
-/// 押してもメニューが閉じないチェック項目。
-/// メニューバーと目印の「…」の両方で使う。幅と余白は長押し時間のスライダーに揃える
+/// 押してもメニューが閉じないチェック項目。メニューバーと目印の「…」の両方で使う。
+///
+/// NSMenu は項目を選ぶと必ず閉じる。開いたままにする道は「項目に view を持たせる」しかない。
+/// view を持つ項目は AppKit が勝手に閉じないので、閉じるかどうかをこちらで決められる。
+/// 代わりに見た目は全部こちらで描くことになるので、対象はチェックの付く項目だけに絞っている。
+/// 見た目は標準の項目と同じ（左にチェック、載せると反転）にして、
+/// 隣の普通の項目と並んでも区別がつかないようにする。nagara の同名のビューと同じ作り。
+///
+/// **この項目を入れるメニューは `autoenablesItems = false` にすること。**
+/// action の無い項目は AppKit が勝手に無効化し、灰色で押せなくなる
 @MainActor
 enum MenuToggle {
-
-    static let width: CGFloat = 250
 
     static func item(_ title: String, _ controller: Controller,
                      _ keyPath: ReferenceWritableKeyPath<Controller, Bool>,
                      isEnabled: Bool = true) -> NSMenuItem {
-        let item = NSMenuItem()
-        let view = NSHostingView(rootView: ToggleRow(controller: controller, title: title,
-                                                     keyPath: keyPath, isEnabled: isEnabled))
-        view.frame = NSRect(x: 0, y: 0, width: width, height: 24)
-        item.view = view
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = isEnabled
+        item.view = StickyMenuItemView(title: title,
+                                       isOn: { controller[keyPath: keyPath] },
+                                       select: { controller[keyPath: keyPath].toggle() })
         return item
     }
+}
 
-    private struct ToggleRow: View {
-        @ObservedObject var controller: Controller
-        let title: String
-        let keyPath: ReferenceWritableKeyPath<Controller, Bool>
-        let isEnabled: Bool
+/// 選んでも閉じないメニュー項目の中身。
+/// 標準の項目と隣り合うため、字下げと高さは標準に寄せてある。
+/// ここがずれると、同じメニューの中で行が揃わずに目立つ
+final class StickyMenuItemView: NSView {
 
-        var body: some View {
-            Toggle(title, isOn: Binding(get: { controller[keyPath: keyPath] },
-                                        set: { controller[keyPath: keyPath] = $0 }))
-                .toggleStyle(.checkbox)
-                .disabled(!isEnabled)
-                .padding(.horizontal, 12)
-                .frame(width: MenuToggle.width, height: 24, alignment: .leading)
+    private static let font = NSFont.menuFont(ofSize: 0)
+    private static let titleLeading: CGFloat = 22
+    private static let trailing: CGFloat = 24
+    private static let rowHeight = max(20, ceil(NSFont.menuFont(ofSize: 0).boundingRectForFont.height) + 3)
+
+    private let title: String
+    private let isOn: () -> Bool
+    private let select: () -> Void
+    private var isInside = false
+
+    init(title: String, isOn: @escaping () -> Bool, select: @escaping () -> Void) {
+        self.title = title
+        self.isOn = isOn
+        self.select = select
+        let width = (title as NSString)
+            .size(withAttributes: [.font: Self.font]).width + Self.titleLeading + Self.trailing
+        super.init(frame: NSRect(x: 0, y: 0, width: ceil(width), height: Self.rowHeight))
+        autoresizingMask = [.width]
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("使わない") }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isInside = true
+        needsDisplay = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isInside = false
+        needsDisplay = true
+    }
+
+    /// 選んでも閉じない。閉じるのはメニューの外を押したときと esc のとき（AppKit 任せ）
+    override func mouseUp(with event: NSEvent) {
+        guard enclosingMenuItem?.isEnabled ?? true else { return }
+        select()
+        // 同じメニューの他のチェックも描き直す
+        var menu = enclosingMenuItem?.menu
+        while let current = menu {
+            for entry in current.items {
+                (entry.view as? StickyMenuItemView)?.needsDisplay = true
+            }
+            menu = current.supermenu
         }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let enabled = enclosingMenuItem?.isEnabled ?? true
+        let highlighted = enabled && (isInside || enclosingMenuItem?.isHighlighted == true)
+
+        if highlighted {
+            // selectedMenuItemColor は 11.0 で非推奨。いまのメニューの選択色はアクセント色
+            NSColor.controlAccentColor.setFill()
+            NSBezierPath(
+                roundedRect: bounds.insetBy(dx: 5, dy: 0), xRadius: 4, yRadius: 4
+            ).fill()
+        }
+
+        let color: NSColor
+        if !enabled {
+            color = .disabledControlTextColor
+        } else {
+            color = highlighted ? .selectedMenuItemTextColor : .labelColor
+        }
+
+        let attributes: [NSAttributedString.Key: Any] = [.font: Self.font, .foregroundColor: color]
+        let size = (title as NSString).size(withAttributes: attributes)
+        (title as NSString).draw(
+            at: NSPoint(x: Self.titleLeading, y: (bounds.height - size.height) / 2),
+            withAttributes: attributes)
+
+        guard isOn() else { return }
+        let configuration = NSImage.SymbolConfiguration(pointSize: Self.font.pointSize, weight: .semibold)
+            .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
+        guard let check = NSImage(systemSymbolName: "checkmark", accessibilityDescription: nil)?
+            .withSymbolConfiguration(configuration) else { return }
+        check.draw(in: NSRect(
+            x: 8,
+            y: (bounds.height - check.size.height) / 2,
+            width: check.size.width,
+            height: check.size.height))
     }
 }

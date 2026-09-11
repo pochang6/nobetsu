@@ -276,6 +276,8 @@ final class Controller: ObservableObject {
     /// 全部の設定はメニューバー側にある
     private func buildIndicatorMenu() -> NSMenu {
         let menu = NSMenu()
+        // チェック項目（MenuToggle）は action を持たないので、自動の無効化を切る
+        menu.autoenablesItems = false
 
         // 設定が先、やめる操作は最後。
         //
@@ -287,9 +289,9 @@ final class Controller: ObservableObject {
 
         // チェックの切り替えでメニューを閉じない。
         // 通常の NSMenuItem は押した瞬間に閉じるので、入ったのか外れたのかを
-        // もう一度開いて確かめることになる。自前のビューに載せたチェックボックスは
+        // もう一度開いて確かめることになる。自前のビューに載せた項目は
         // クリックしてもメニューが閉じず、切り替えた結果がその場で見える
-        // （下の長押し時間のスライダーと同じ仕組み）
+        // （下の長押し時間のスライダーと同じ仕組み。StatusMenu.swift を参照）
         menu.addItem(MenuToggle.item("開始と終了を音で知らせる", self, \.soundEnabled))
         menu.addItem(MenuToggle.item("認識中の文字を画面に流す", self, \.showsTranscript))
         menu.addItem(MenuToggle.item("入力先から離れたら止める", self, \.stopsWhenFocusLeaves))
