@@ -285,20 +285,14 @@ final class Controller: ObservableObject {
         // そのための項目は要らない。
         // 何が起きるかを言い切る文言にして、位置も下（終了操作の定位置）へ移した
 
-        let sound = menu.addItem(withTitle: "開始と終了を音で知らせる",
-                                 action: #selector(menuToggleSound), keyEquivalent: "")
-        sound.target = self
-        sound.state = soundEnabled ? .on : .off
-
-        let transcript = menu.addItem(withTitle: "認識中の文字を画面に流す",
-                                      action: #selector(menuToggleTranscript), keyEquivalent: "")
-        transcript.target = self
-        transcript.state = showsTranscript ? .on : .off
-
-        let focus = menu.addItem(withTitle: "入力先から離れたら止める",
-                                 action: #selector(menuToggleFocusStop), keyEquivalent: "")
-        focus.target = self
-        focus.state = stopsWhenFocusLeaves ? .on : .off
+        // チェックの切り替えでメニューを閉じない。
+        // 通常の NSMenuItem は押した瞬間に閉じるので、入ったのか外れたのかを
+        // もう一度開いて確かめることになる。自前のビューに載せたチェックボックスは
+        // クリックしてもメニューが閉じず、切り替えた結果がその場で見える
+        // （下の長押し時間のスライダーと同じ仕組み）
+        menu.addItem(MenuToggle.item("開始と終了を音で知らせる", self, \.soundEnabled))
+        menu.addItem(MenuToggle.item("認識中の文字を画面に流す", self, \.showsTranscript))
+        menu.addItem(MenuToggle.item("入力先から離れたら止める", self, \.stopsWhenFocusLeaves))
 
         menu.addItem(.separator())
 
@@ -381,9 +375,6 @@ final class Controller: ObservableObject {
     }
 
     @objc private func menuStop() { stop() }
-    @objc private func menuToggleSound() { soundEnabled.toggle() }
-    @objc private func menuToggleTranscript() { showsTranscript.toggle() }
-    @objc private func menuToggleFocusStop() { stopsWhenFocusLeaves.toggle() }
     @objc private func menuSelectCommandKey(_ sender: NSMenuItem) {
         guard let rawValue = sender.representedObject as? String,
               let choice = CommandKeyChoice(rawValue: rawValue) else { return }
@@ -598,7 +589,10 @@ private struct HoldThresholdMenuView: View {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var statusMenu: StatusMenu?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        statusMenu = StatusMenu(controller: Controller.shared)
         Controller.shared.bootstrap()
     }
 }
@@ -607,107 +601,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct NobetsuApp: App {
 
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-    @StateObject private var controller = Controller.shared
 
     var body: some Scene {
-        MenuBarExtra {
-            if controller.needsPermission {
-                // ここは「動かない人が最初に開く場所」です。
-                // 警告の三角を出したまま何も言わないと、壊れていると読まれて終わります。
-                // 何が足りないのか・それが何の許可なのか・どこを開けばよいのかを、
-                // このメニューだけで完結させます
-                if let advice = controller.advice {
-                    Text(advice.title)
-                    ForEach(advice.lines, id: \.self) { line in
-                        Text(line)
-                    }
-                    Divider()
-                    if advice.showsInputMonitoringButton {
-                        Button("入力監視の設定を開く") { Permissions.openInputMonitoringSettings() }
-                    }
-                    if advice.showsAccessibilityButton {
-                        Button("アクセシビリティの設定を開く") { Permissions.openAccessibilitySettings() }
-                    }
-                } else {
-                    Text("許可の状態を調べています")
-                    Divider()
-                    Button("入力監視の設定を開く") { Permissions.openInputMonitoringSettings() }
-                }
-                // 救済措置。ダイアログを閉じてしまった人がここからやり直せる
-                Button("許可をもう一度求める") { controller.requestPermissions() }
-                Divider()
-            } else {
-                Button(controller.isActive ? "停止" : "話しはじめる") {
-                    controller.toggle()
-                }
-                Text(controller.status)
-                Divider()
-                Text("⌘ を長押しで開始")
-                Text("もう一度 ⌘、または ESC で停止")
-                Divider()
-            }
-
-            Toggle("ログイン時に起動", isOn: $controller.launchAtLogin)
-            Toggle("開始と終了を音で知らせる", isOn: $controller.soundEnabled)
-            Toggle("認識中の目印を出す", isOn: $controller.showsIndicator)
-            Toggle("認識中の文字を画面に流す", isOn: $controller.showsTranscript)
-
-            Picker("開始までの長押し: \(controller.holdThreshold, specifier: "%.1f") 秒",
-                   selection: $controller.holdThreshold) {
-                ForEach(5...20, id: \.self) { tenths in
-                    Text("\(Double(tenths) / 10, specifier: "%.1f") 秒")
-                        .tag(Double(tenths) / 10)
-                }
-            }
-            .pickerStyle(.menu)
-            Picker("開始に使う ⌘", selection: $controller.commandKeyChoice) {
-                ForEach(CommandKeyChoice.allCases) { choice in
-                    Text(choice.title).tag(choice)
-                }
-            }
-            .pickerStyle(.menu)
-            Toggle("入力先から離れたら止める", isOn: $controller.stopsWhenFocusLeaves)
-            Toggle("遠距離マイク補正", isOn: $controller.useFarField)
-                .disabled(controller.isActive)
-
-            Divider()
-
-            if !controller.dictionaryIssues.isEmpty {
-                Text("一部の辞書を読み込めません（読めた規則は使用中）")
-                ForEach(controller.dictionaryIssues) { issue in
-                    Button(issue.title) {
-                        NSWorkspace.shared.selectFile(issue.url.path,
-                            inFileViewerRootedAtPath: issue.url.deletingLastPathComponent().path)
-                    }
-                    Text(issue.reason)
-                }
-                Divider()
-            }
-            Button("辞書を編集する") { controller.editDictionary() }
-            Button("辞書を読み直す") { controller.reloadDictionary() }
-            Button("引き継いだ辞書・バックアップを開く") {
-                NSWorkspace.shared.open(DictionaryStorage.directory)
-            }
-
-            Divider()
-
-            // 利用者がバージョンを確かめられる唯一の場所。
-            // 不具合の報告をもらうときに「どれを使っているか」が分からないと話が始まらない
-            Text("nobetsu \(NobetsuApp.version)")
-
-            Button("nobetsu を終了") { NSApp.terminate(nil) }
-        } label: {
-            Image(systemName: iconName)
-        }
+        // メニューバーは AppKit（StatusMenu.swift）で組む。
+        // SwiftUI の MenuBarExtra ではチェックを切り替えた瞬間にメニューが閉じてしまうため。
+        // App には Scene が1つ要るので、開くことのない設定画面を形だけ置く
+        Settings { EmptyView() }
     }
 
     /// Info.plist に焼き込まれた値。元は VERSION ファイル1枚
     static var version: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
-    }
-
-    private var iconName: String {
-        if controller.needsPermission || !controller.dictionaryIssues.isEmpty { return "exclamationmark.triangle.fill" }
-        return controller.isRunning ? "waveform.circle.fill" : "waveform"
     }
 }

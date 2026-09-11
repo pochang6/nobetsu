@@ -146,7 +146,8 @@ NOBETSU_ALLOW_ADHOC=1 ./build.sh   # アドホックで設置する。許可は�
 
 | ファイル | 役割 |
 |---|---|
-| `Sources/App.swift` | 全体の配線、メニューバー、許可の要求 |
+| `Sources/App.swift` | 全体の配線、目印のメニュー、許可の要求 |
+| `Sources/StatusMenu.swift` | メニューバーのアイコンとメニュー（AppKit）。チェック項目は押しても閉じない |
 | `Sources/Dictation.swift` | `SpeechAnalyzer` + `DictationTranscriber` による認識 |
 | `Sources/Injector.swift` | 最前面のアプリへ文字を打ち込む。**ここが核心** |
 | `Sources/Trigger.swift` | `CGEventTap` によるキーの見張り |
@@ -365,6 +366,16 @@ AX の左上原点と AppKit の左下原点を混ぜないこと。問い合わ
 固定先は接続順や一時的な画面番号ではなく、ColorSync の表示 UUID を UserDefaults へ保存します。
 未接続の間は自動追従へ戻し、設定は保持して再接続時に復帰します。
 「入力欄の画面へ自動で移動」で固定解除。「位置を初期状態に戻す」はオフセットだけを消します。
+
+**チェック項目を切り替えてもメニューを閉じない。**
+普通の `NSMenuItem` や SwiftUI の `Toggle` は押した瞬間にメニューが閉じるため、
+入ったのか外れたのかをもう一度開いて確かめることになります。
+macOS の SwiftUI には閉じないようにする手段が無い（`menuActionDismissBehavior(.disabled)` は
+macOS では使えない）ので、メニューバーは `MenuBarExtra` ではなく AppKit の `NSMenu` で組み、
+チェック項目は `NSMenuItem.view` に載せた自前のビュー（`MenuToggle`）にしています。
+ビューの中で起きたクリックはメニューを閉じません（長押し時間のスライダーと同じ仕組み）。
+代わりにその行はマウスを載せても反転せず、矢印キーでも選べません。
+選ぶと閉じる項目（⌘ の左右、画面の固定先）はそのまま普通の項目です。
 
 **目印はフォーカスを奪ってはいけない。**
 奪うと打ち込んだ文字が入力先ではなく目印に入り、機能そのものが壊れます。
