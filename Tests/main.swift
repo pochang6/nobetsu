@@ -1,5 +1,6 @@
 import Foundation
 import Compression
+import CoreGraphics
 
 /// nobetsu の、副作用を持たない部分を確かめる。
 ///
@@ -26,6 +27,7 @@ struct Tests {
         follow()
         advice()
         triggerSettings()
+        triggerHold()
         archive()
         dictionaryStorage()
         dictionaryLoading()
@@ -262,6 +264,64 @@ struct Tests {
                Int(TriggerSettings.normalizedHoldThreshold(9.0) * 10), 20)
         expect("長押しの既定は1秒",
                Int(TriggerSettings.defaultHoldThreshold * 10), 10)
+    }
+
+    /// ⌘ の押し離しの状態機械。イベントタップは要らず、届いたイベントを順に渡すだけで確かめられる。
+    ///
+    /// ⌃⌘Q や画面ロック、パスワード欄で ⌘ の「離す」を取りこぼすと、
+    /// 次の長押しが黙って無視される（ログにも残らない）。実際に「一度だけ効かなかった」形で起きた。
+    /// 立て直しの条件は入力だけで決まるので、ここで固定しておく
+    @MainActor
+    static func triggerHold() {
+        let leftCmd: Int64 = 55, rightCmd: Int64 = 54, keyQ: Int64 = 12
+        let cmd = CGEventFlags.maskCommand
+        let none = CGEventFlags()
+
+        func fresh() -> TriggerMonitor {
+            let m = TriggerMonitor()
+            m.holdThreshold = 60  // テスト中に勝手に発火しないよう長く取る
+            return m
+        }
+
+        var m = fresh()
+        _ = m.handle(type: .flagsChanged, keyCode: leftCmd, flags: cmd, momentum: 0)
+        expect("⌘ を押すと長押し判定が始まる", m.isHoldPending, true)
+        _ = m.handle(type: .flagsChanged, keyCode: leftCmd, flags: none, momentum: 0)
+        expect("⌘ を離すと判定をやめる", m.isHoldPending, false)
+
+        m = fresh()
+        _ = m.handle(type: .flagsChanged, keyCode: leftCmd, flags: cmd, momentum: 0)
+        _ = m.handle(type: .keyDown, keyCode: keyQ, flags: cmd, momentum: 0)
+        expect("⌘Q のようなショートカットは判定を取り下げる", m.isHoldPending, false)
+        // ここで画面がロックされ、⌘ の「離す」が届かなかったとする
+        _ = m.handle(type: .flagsChanged, keyCode: leftCmd, flags: cmd, momentum: 0)
+        expect("離しを取りこぼしても、同じ ⌘ を押し直せば判定が始まる", m.isHoldPending, true)
+
+        m = fresh()
+        _ = m.handle(type: .flagsChanged, keyCode: leftCmd, flags: cmd, momentum: 0)
+        _ = m.handle(type: .keyDown, keyCode: keyQ, flags: cmd, momentum: 0)
+        // 離しを取りこぼしたまま、⌘ 無しでクリックした（＝⌘ は押されていない）
+        _ = m.handle(type: .leftMouseDown, keyCode: 0, flags: none, momentum: 0)
+        _ = m.handle(type: .flagsChanged, keyCode: rightCmd, flags: cmd, momentum: 0)
+        expect("⌘ 無しの操作で取りこぼしに気づき、反対側の ⌘ でも判定が始まる", m.isHoldPending, true)
+
+        m = fresh()
+        _ = m.handle(type: .flagsChanged, keyCode: leftCmd, flags: cmd, momentum: 0)
+        _ = m.handle(type: .flagsChanged, keyCode: rightCmd, flags: cmd, momentum: 0)
+        expect("両方の ⌘ を押しているだけなら最初の判定を続ける", m.isHoldPending, true)
+        _ = m.handle(type: .keyDown, keyCode: keyQ, flags: cmd, momentum: 0)
+        expect("⌘ を押したまま他のキーが来たら取り下げる（立て直しと混同しない）", m.isHoldPending, false)
+
+        m = fresh()
+        m.isRunning = true
+        _ = m.handle(type: .flagsChanged, keyCode: leftCmd, flags: cmd, momentum: 0)
+        expect("認識中は長押しで始めない", m.isHoldPending, false)
+
+        m = fresh()
+        m.isRunning = true
+        m.isPaused = true
+        _ = m.handle(type: .flagsChanged, keyCode: leftCmd, flags: cmd, momentum: 0)
+        expect("一時停止中は長押しで再開できる", m.isHoldPending, true)
     }
 
     /// ログは追記しかしないので、放っておくと際限なく育つ。

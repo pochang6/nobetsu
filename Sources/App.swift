@@ -477,6 +477,8 @@ extension Controller: DictationDelegate {
         // 一時停止して目印が残っている間も ESC で閉じられるようにしておく。
         // × を押すしかない状態にすると、キーボードから抜け出せなくなる
         trigger.isRunning = isActive || keepIndicatorVisible
+        // 一時停止中は ⌘ の長押しで再開できる。これが無いと、目印の ▶ を押すしかない
+        trigger.isPaused = !isActive && keepIndicatorVisible
 
         if running {
             if showsIndicator {

@@ -73,6 +73,9 @@ final class TriggerMonitor {
     /// 認識中に Enter で送信した。文脈の切れ目として扱う
     var onUserSubmitted: (() -> Void)?
     var isRunning = false
+    /// 一時停止中（目印だけ残っている）。⌘ の単独タップで閉じられるよう `isRunning` は
+    /// 立てたままにするが、長押しでの再開は受け付けなければならない
+    var isPaused = false
 
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
@@ -84,6 +87,8 @@ final class TriggerMonitor {
     /// この押下で既に開始した。離しても停止させないための印
     private var holdConsumed = false
     private var holdTimer: Timer?
+    /// 長押しの判定を待っている最中か（テスト用。タップは要らない）
+    var isHoldPending: Bool { holdTimer != nil }
 
     private static let keyEscape: Int64 = 53
     private static let keyCommandLeft: Int64 = 55
@@ -182,8 +187,23 @@ final class TriggerMonitor {
     }
 
     /// 戻り値 true でイベントを飲み込む
-    private func handle(type: CGEventType, keyCode: Int64, flags: CGEventFlags,
-                        momentum: Int64) -> Bool {
+    func handle(type: CGEventType, keyCode: Int64, flags: CGEventFlags,
+                momentum: Int64) -> Bool {
+
+        // ⌘ の「離す」を取りこぼしていたら、ここで立て直す。
+        //
+        // ⌃⌘Q で画面をロックしたときやスリープに入ったとき、パスワード欄（セキュア入力）へ
+        // 移ったときは、押した ⌘ の「離す」がタップへ届かない。すると `commandDownAt` が
+        // 残ったままになり、**次の長押しが黙って無視される**（押し直せば直るので、
+        // 「一度だけ効かなかった」という形で現れる。ログには何も残らない）。
+        // どのイベントにも今の修飾キーの状態が付いてくるので、⌘ が付いていないのに
+        // 「押しているつもり」でいたら、それは取りこぼしと分かる
+        let isCommandKeyEvent = type == .flagsChanged
+            && (keyCode == TriggerMonitor.keyCommandLeft || keyCode == TriggerMonitor.keyCommandRight)
+        if commandDownAt != nil, !isCommandKeyEvent, !flags.contains(.maskCommand) {
+            Log.write("trigger: ⌘ の離しを取りこぼしていたので立て直す")
+            resetHold()
+        }
 
         switch type {
 
@@ -270,28 +290,50 @@ final class TriggerMonitor {
     // MARK: - ⌘ の押し下げと離し
 
     private func commandDown(keyCode: Int64) {
-        guard commandDownAt == nil else { return }
+        if commandDownAt != nil {
+            // 同じ ⌘ がもう一度「押された」＝間の「離す」を取りこぼしている。
+            // 押しているつもりの状態を引きずると、この押下が黙って無視される。
+            // 左右の別の ⌘ なら、両方押しているだけなので今までどおり無視する
+            guard keyCode == commandKeyCode else { return }
+            Log.write("trigger: ⌘ の離しを取りこぼしていたので押し直しとして扱う")
+            resetHold()
+        }
 
         commandDownAt = Date()
         commandKeyCode = keyCode
         holdInvalidated = false
         holdConsumed = false
 
-        guard !isRunning else { return }
+        // 認識中は長押しで始めるものが無い。一時停止中は再開に使う
+        guard !isRunning || isPaused else { return }
 
         guard commandKeyChoice.accepts(keyCode: keyCode) else { return }
 
+        // `.common` に入れるのは、メニューを開いている間や目印をドラッグしている間
+        // （run loop が tracking モード）でも判定が遅れないようにするため
         holdTimer?.invalidate()
-        holdTimer = Timer.scheduledTimer(withTimeInterval: holdThreshold, repeats: false) { [weak self] _ in
+        let timer = Timer(timeInterval: holdThreshold, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 self.holdTimer = nil
-                guard self.commandDownAt != nil, !self.holdInvalidated, !self.isRunning else { return }
+                guard self.commandDownAt != nil, !self.holdInvalidated,
+                      !self.isRunning || self.isPaused else { return }
                 self.holdConsumed = true
-                Log.write("⌘ 長押しを検知 → 開始")
+                Log.write("⌘ 長押しを検知 → \(self.isPaused ? "再開" : "開始")")
                 self.fireStart()
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        holdTimer = timer
+    }
+
+    /// 押しているつもりの状態を捨てる。停止も開始もしない
+    private func resetHold() {
+        holdTimer?.invalidate()
+        holdTimer = nil
+        commandDownAt = nil
+        holdInvalidated = false
+        holdConsumed = false
     }
 
     private func commandUp() {
