@@ -46,6 +46,9 @@ final class IndicatorController {
     private var lastNudgeAt = Date.distantPast
 
     private static let size = NSSize(width: 222, height: 42)
+    private static let collectionBehavior: NSWindow.CollectionBehavior = [
+        .canJoinAllSpaces, .canJoinAllApplications, .stationary, .fullScreenAuxiliary, .ignoresCycle
+    ]
 
     func show() {
         wantsVisible = true
@@ -242,7 +245,8 @@ final class IndicatorController {
         p.backgroundColor = .clear
         p.hasShadow = true
         p.hidesOnDeactivate = false
-        p.collectionBehavior = [.canJoinAllSpaces, .canJoinAllApplications, .stationary, .fullScreenAuxiliary, .ignoresCycle]
+        p.collectionBehavior = Self.collectionBehavior
+        p.animationBehavior = .none
 
         // 背景をつかんで動かせるようにする。ボタンの上以外はどこでも掴める
         p.isMovable = true
@@ -331,7 +335,11 @@ final class IndicatorController {
         targetWindowFrame = window
         guard wantsVisible else { return }
         reposition()
-        if changed || panel?.isOnActiveSpace == false { panel?.orderFrontRegardless() }
+        if panel?.isVisible == false || panel?.isOnActiveSpace == false {
+            refreshSpace()
+        } else if changed {
+            panel?.orderFrontRegardless()
+        }
     }
 
     private func reposition() {
@@ -349,11 +357,27 @@ final class IndicatorController {
         for delay in [0.15, 0.55] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self, self.wantsVisible, self.spaceGeneration == token else { return }
-                self.reposition()
-                self.panel?.orderFrontRegardless()
+                self.restoreAcrossSpaces()
             }
         }
         Log.write("indicator: Space・画面の変更に追従する")
+    }
+
+    /// 前面へ出すだけでは、以前の Space に残ったウィンドウの所属は直らない。
+    /// いったん外して全 Space への参加を登録し直す。activate はせず入力先を保つ。
+    private func restoreAcrossSpaces() {
+        guard wantsVisible, let panel else { return }
+        // ドラッグの途中でウィンドウを外さない。
+        guard NSEvent.pressedMouseButtons == 0 else { return }
+        let wasVisible = panel.isVisible
+        let wasOnSpace = panel.isOnActiveSpace
+        panel.orderOut(nil)
+        panel.collectionBehavior = []
+        panel.collectionBehavior = Self.collectionBehavior
+        reposition()
+        panel.alphaValue = 1
+        panel.orderFrontRegardless()
+        Log.write("indicator: Space へ再登録 visible=\(wasVisible)→\(panel.isVisible) activeSpace=\(wasOnSpace)→\(panel.isOnActiveSpace) frame=\(panel.frame)")
     }
 
     /// 覚えた位置は「画面の左下からの距離」なので、どの画面でも同じ場所に出る
