@@ -69,4 +69,18 @@ extension Tests {
         choose("複数画面にまたがるウィンドウでも入力欄のある方を選ぶ", horizontal,
                CGRect(x: 1100, y: 50, width: 100, height: 100), CGRect(x: 0, y: 50, width: 1300, height: 600), 1)
     }
+
+    static func indicatorServerFrame() {
+        // 実測値: AppKit は主画面 (646, 881)、window server は外部モニターの (2116, -511)
+        let appKit = CGRect(x: 646, y: 881, width: 222, height: 42)
+        func matches(_ server: CGRect) -> Bool {
+            IndicatorPlacement.serverMatches(appKit: appKit, server: server, primaryHeight: 956)
+        }
+        expect("window server と一致していれば置き直さない", matches(CGRect(x: 646, y: 33, width: 222, height: 42)), true)
+        expect("外部モニターへ戻された窓を食い違いとして検出する",
+               matches(CGRect(x: 2116, y: -511, width: 222, height: 42)), false)
+        expect("上下だけの食い違いも検出する", matches(CGRect(x: 646, y: 200, width: 222, height: 42)), false)
+        expect("1pt 未満の丸め誤差は一致とみなす", matches(CGRect(x: 646.5, y: 33.4, width: 222, height: 42)), true)
+        expect("枠が取れなければ置き直さない", matches(.null), true)
+    }
 }

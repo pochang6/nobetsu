@@ -34,6 +34,7 @@ struct Tests {
         dictationLifecycle()
         indicatorPlacement()
         indicatorScreenSelection()
+        indicatorServerFrame()
         indicatorScreenPreference()
 
         print("")

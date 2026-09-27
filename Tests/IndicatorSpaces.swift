@@ -85,8 +85,30 @@ struct IndicatorSpacesCheck {
         checkScreen(0, "Space refresh preserves screen")
         precondition(NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground, "Space refresh stole focus")
         precondition(app.keyWindow == nil, "Space refresh became key")
+        // 外部モニターの抜き差しでは、window server だけが窓を別の場所へ戻し、AppKit の frame は古いまま残る。
+        // 実際の位置を問い合わせて置き直せているかを、window server 側だけ動かして再現して確かめる。
+        func serverOrigin() -> CGPoint? {
+            let info = (CGWindowListCopyWindowInfo([.optionIncludingWindow], CGWindowID(panel.windowNumber)) as? [[String: Any]])?.first
+            return (info?[kCGWindowBounds as String] as? NSDictionary).flatMap { CGRect(dictionaryRepresentation: $0) }?.origin
+        }
+        typealias ConnFn = @convention(c) () -> Int32
+        typealias MoveFn = @convention(c) (Int32, Int32, UnsafePointer<CGPoint>) -> Int32
+        let cgs = dlopen(nil, RTLD_NOW)
+        if let connSym = dlsym(cgs, "CGSMainConnectionID"), let moveSym = dlsym(cgs, "CGSMoveWindow") {
+            let expected = serverOrigin()
+            var elsewhere = CGPoint(x: panel.frame.minX + 400, y: 200)
+            _ = unsafeBitCast(moveSym, to: MoveFn.self)(unsafeBitCast(connSym, to: ConnFn.self)(), Int32(panel.windowNumber), &elsewhere)
+            wait(0.3)
+            precondition(serverOrigin() != expected, "Window server move must diverge from AppKit")
+            indicator.follow(inputAXFrame: inputAX, windowAXFrame: windowAX)
+            wait(0.3)
+            precondition(serverOrigin() == expected, "Diverged window server position must be restored")
+            print("window server divergence: restored to \(expected.map { "\($0)" } ?? "-")")
+        } else {
+            print("SKIP: window server divergence (CGSMoveWindow unavailable)")
+        }
         indicator.hide()
         wait(0.6)
-        print("PASS: Space recovery, hide during recovery, rapid restart, pinning and no focus theft on \(screens.count) connected screens")
+        print("PASS: Space recovery, window server divergence, hide during recovery, rapid restart, pinning and no focus theft on \(screens.count) connected screens")
     }
 }

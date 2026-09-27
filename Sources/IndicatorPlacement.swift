@@ -40,6 +40,15 @@ enum IndicatorPlacement {
         return selected
     }
 
+    /// window server が実際に置いている枠（CG は主画面左上原点）が、AppKit で置いたつもりの枠と同じか。
+    /// 外部モニターの抜き差しで window server だけが窓を元の画面へ戻すことがあり、
+    /// そのとき AppKit の `frame` は古いまま残る。1pt 未満の差は丸めの違いとして無視する。
+    static func serverMatches(appKit: CGRect, server: CGRect, primaryHeight: CGFloat) -> Bool {
+        guard !server.isNull else { return true }
+        let placed = appKitFrame(server, primaryHeight: primaryHeight)
+        return abs(placed.minX - appKit.minX) < 1 && abs(placed.minY - appKit.minY) < 1
+    }
+
     static func origin(offset: CGPoint, size: CGSize, visible: CGRect) -> CGPoint {
         clamp(CGPoint(x: visible.minX + offset.x, y: visible.minY + offset.y),
               size: size, visible: visible)

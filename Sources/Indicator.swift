@@ -41,6 +41,8 @@ final class IndicatorController {
     private var targetWindowFrame: CGRect?
     private var lastScreenNumber: NSNumber?
     private var spaceGeneration: UInt64 = 0
+    private var lastFollowRefreshAt = Date.distantPast
+    private var lastMismatchOrigin: CGPoint?
     /// 直近に文字を打ち込んだ時刻。カーソルが隠されるのはこの直後だけ
     private var lastInjectAt = Date.distantPast
     private var lastNudgeAt = Date.distantPast
@@ -333,12 +335,18 @@ final class IndicatorController {
         let changed = input != inputFrame || window != targetWindowFrame
         inputFrame = input
         targetWindowFrame = window
-        guard wantsVisible else { return }
+        guard wantsVisible, let panel else { return }
         reposition()
-        if panel?.isVisible == false || panel?.isOnActiveSpace == false {
+        // isOnActiveSpace では決めない。別の画面へ固定しているときは、入力先の画面の
+        // Space に目印が無いのが正しいのに false になり、0.4 秒ごとに出し直し続けた。
+        // 見るのは「window server 上で表示されているか」だけ。出し直しは 2 秒に 1 回まで。
+        let shown = panel.isVisible && Self.serverState(of: panel)?.onscreen != false
+        if !shown {
+            guard Date().timeIntervalSince(lastFollowRefreshAt) > 2 else { return }
+            lastFollowRefreshAt = Date()
             refreshSpace()
         } else if changed {
-            panel?.orderFrontRegardless()
+            panel.orderFrontRegardless()
         }
     }
 
@@ -346,7 +354,44 @@ final class IndicatorController {
         guard let panel, NSEvent.pressedMouseButtons == 0 else { return }
         isPositioning = true
         defer { isPositioning = false }
-        panel.setFrameOrigin(savedOrigin(for: panel))
+        let origin = savedOrigin(for: panel)
+        panel.setFrameOrigin(origin)
+        syncServerFrame(panel, origin: origin)
+    }
+
+    /// **AppKit の `frame` と、窓が実際にある場所は食い違うことがある。**
+    ///
+    /// 外部モニターを抜き差しすると、window server は窓を元のモニターへ戻すが、
+    /// AppKit の `frame` は古い位置のまま残る。同じ位置への `setFrameOrigin` は何もしないので、
+    /// 目印は外部モニターに置き去りになり、所属もそのモニターの Space だけになる。
+    /// 主画面で喋っている間は、どの Space へ移っても目印が見えない（v1.4.5 まで続いた不具合）。
+    /// 実際の位置を問い合わせ、ずれていたら 1pt 動かして戻し、位置を送り直させる。
+    private func syncServerFrame(_ panel: NSPanel, origin: NSPoint) {
+        guard let primary = NSScreen.screens.first,
+              let server = Self.serverState(of: panel)?.frame else { return }
+        if IndicatorPlacement.serverMatches(appKit: panel.frame, server: server,
+                                            primaryHeight: primary.frame.height) {
+            lastMismatchOrigin = nil
+            return
+        }
+        panel.setFrameOrigin(NSPoint(x: origin.x + 1, y: origin.y))
+        panel.setFrameOrigin(origin)
+        // 直らないまま 0.4 秒ごとに同じ行を積まない
+        guard lastMismatchOrigin != server.origin else { return }
+        lastMismatchOrigin = server.origin
+        Log.write("indicator: 実際の位置が食い違っていたので置き直す AppKit=\(panel.frame.origin) 実際(左上原点)=\(server.origin)")
+    }
+
+    /// window server 上の実際の枠（主画面左上原点）と、画面に出ているか。
+    private static func serverState(of panel: NSWindow) -> (frame: CGRect, onscreen: Bool)? {
+        guard panel.windowNumber > 0,
+              let list = CGWindowListCopyWindowInfo([.optionIncludingWindow],
+                                                    CGWindowID(panel.windowNumber)) as? [[String: Any]],
+              let info = list.first,
+              let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+              let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary)
+        else { return nil }
+        return (frame, info[kCGWindowIsOnscreen as String] as? Bool ?? false)
     }
 
     private func refreshSpace() {
@@ -363,21 +408,26 @@ final class IndicatorController {
         Log.write("indicator: Space・画面の変更に追従する")
     }
 
-    /// 前面へ出すだけでは、以前の Space に残ったウィンドウの所属は直らない。
+    /// Space の切り替え後に、目印が画面に出ているかを確かめて戻す。
+    /// 位置の食い違いは `reposition` が直す。それでも出ていなければ、
     /// いったん外して全 Space への参加を登録し直す。activate はせず入力先を保つ。
     private func restoreAcrossSpaces() {
         guard wantsVisible, let panel else { return }
         // ドラッグの途中でウィンドウを外さない。
         guard NSEvent.pressedMouseButtons == 0 else { return }
+        reposition()
+        panel.alphaValue = 1
+        if panel.isVisible, Self.serverState(of: panel)?.onscreen != false {
+            panel.orderFrontRegardless()
+            return
+        }
         let wasVisible = panel.isVisible
-        let wasOnSpace = panel.isOnActiveSpace
         panel.orderOut(nil)
         panel.collectionBehavior = []
         panel.collectionBehavior = Self.collectionBehavior
-        reposition()
-        panel.alphaValue = 1
         panel.orderFrontRegardless()
-        Log.write("indicator: Space へ再登録 visible=\(wasVisible)→\(panel.isVisible) activeSpace=\(wasOnSpace)→\(panel.isOnActiveSpace) frame=\(panel.frame)")
+        let state = Self.serverState(of: panel)
+        Log.write("indicator: Space へ再登録 visible=\(wasVisible)→\(panel.isVisible) onscreen=\(state?.onscreen ?? false) frame=\(panel.frame) 実際(左上原点)=\(state?.frame.origin ?? .zero)")
     }
 
     /// 覚えた位置は「画面の左下からの距離」なので、どの画面でも同じ場所に出る
