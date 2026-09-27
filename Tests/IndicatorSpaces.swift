@@ -100,6 +100,11 @@ struct IndicatorSpacesCheck {
             _ = unsafeBitCast(moveSym, to: MoveFn.self)(unsafeBitCast(connSym, to: ConnFn.self)(), Int32(panel.windowNumber), &elsewhere)
             wait(0.3)
             precondition(serverOrigin() != expected, "Window server move must diverge from AppKit")
+            // Space 切り替えのアニメーション中と見分けるため、1 秒以上たって同じずれが 2 回続いたときだけ直す
+            indicator.follow(inputAXFrame: inputAX, windowAXFrame: windowAX)
+            wait(0.1)
+            precondition(serverOrigin() != expected, "A single mismatch (e.g. mid-animation) must not be nudged")
+            wait(1.0)
             indicator.follow(inputAXFrame: inputAX, windowAXFrame: windowAX)
             wait(0.3)
             precondition(serverOrigin() == expected, "Diverged window server position must be restored")
@@ -107,8 +112,52 @@ struct IndicatorSpacesCheck {
         } else {
             print("SKIP: window server divergence (CGSMoveWindow unavailable)")
         }
+        // 全画面の出入りで、全 Space に属するはずの窓が一部の Space にしか属さなくなる。
+        // 所属を削って再現し、今の Space で表示に戻れるかを確かめる。
+        typealias ActiveFn = @convention(c) (Int32) -> UInt64
+        typealias SpacesFn = @convention(c) (Int32, Int32, CFArray) -> Unmanaged<CFArray>?
+        typealias RemoveFn = @convention(c) (Int32, CFArray, CFArray) -> Void
+        if let connSym = dlsym(cgs, "CGSMainConnectionID"), let activeSym = dlsym(cgs, "CGSGetActiveSpace"),
+           let spacesSym = dlsym(cgs, "CGSCopySpacesForWindows"), let removeSym = dlsym(cgs, "CGSRemoveWindowsFromSpaces") {
+            let conn = unsafeBitCast(connSym, to: ConnFn.self)()
+            func current() -> NSWindow { app.windows.first { $0 is NonActivatingPanel && $0.isVisible }! }
+            func onscreen(_ w: NSWindow) -> Bool {
+                ((CGWindowListCopyWindowInfo([.optionIncludingWindow], CGWindowID(w.windowNumber)) as? [[String: Any]])?
+                    .first?[kCGWindowIsOnscreen as String] as? Bool) ?? false
+            }
+            func cutMembership() {
+                let w = current()
+                let all = unsafeBitCast(spacesSym, to: SpacesFn.self)(conn, 0x7, [w.windowNumber] as CFArray)?
+                    .takeRetainedValue() as? [UInt64] ?? []
+                let active = unsafeBitCast(activeSym, to: ActiveFn.self)(conn)
+                unsafeBitCast(removeSym, to: RemoveFn.self)(conn, [w.windowNumber] as CFArray, all.filter { $0 != all.first { $0 != active } } as CFArray)
+                wait(0.3)
+                precondition(!onscreen(w), "Cutting Space membership must hide the window")
+            }
+            cutMembership()
+            wait(2.1)
+            indicator.follow(inputAXFrame: inputAX, windowAXFrame: windowAX)
+            wait(0.8)
+            precondition(onscreen(current()), "Window cut from the active Space must come back after follow")
+            cutMembership()
+            NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
+            wait(0.8)
+            precondition(onscreen(current()), "Window cut from the active Space must come back after a Space change")
+            indicator.hide()
+            wait(0.5)
+            let hidden = app.windows.first { $0 is NonActivatingPanel }!
+            hidden.orderFrontRegardless(); wait(0.1); cutMembership(); hidden.orderOut(nil)
+            indicator.show()
+            wait(0.5)
+            precondition(onscreen(current()), "Window cut while hidden must come back on show")
+            precondition(NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier, "Rebuild stole focus: \(NSWorkspace.shared.frontmostApplication?.localizedName ?? "-")")
+            precondition(app.keyWindow == nil, "Rebuilt indicator became key")
+            print("lost Space membership: recovered after follow, Space change and show")
+        } else {
+            print("SKIP: lost Space membership (CGS unavailable)")
+        }
         indicator.hide()
         wait(0.6)
-        print("PASS: Space recovery, window server divergence, hide during recovery, rapid restart, pinning and no focus theft on \(screens.count) connected screens")
+        print("PASS: Space recovery, window server divergence, lost Space membership, hide during recovery, rapid restart, pinning and no focus theft on \(screens.count) connected screens")
     }
 }

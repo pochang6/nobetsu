@@ -43,6 +43,8 @@ final class IndicatorController {
     private var spaceGeneration: UInt64 = 0
     private var lastFollowRefreshAt = Date.distantPast
     private var lastMismatchOrigin: CGPoint?
+    private var pendingMismatchOrigin: CGPoint?
+    private var lastSpaceChangeAt = Date.distantPast
     /// 直近に文字を打ち込んだ時刻。カーソルが隠されるのはこの直後だけ
     private var lastInjectAt = Date.distantPast
     private var lastNudgeAt = Date.distantPast
@@ -61,6 +63,9 @@ final class IndicatorController {
         reposition()
         panel.alphaValue = 0
         panel.orderFrontRegardless()
+        // 隠れている間に所属 Space から外れていたら、出した時点で作り直す
+        if Self.serverState(of: panel)?.onscreen == false { rebuildPanel(reason: "表示の開始") }
+        guard let panel = self.panel else { return }
 
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.28
@@ -281,7 +286,10 @@ final class IndicatorController {
         spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.refreshSpace() }
+            Task { @MainActor in
+                self?.lastSpaceChangeAt = Date()
+                self?.refreshSpace()
+            }
         }
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
@@ -290,6 +298,37 @@ final class IndicatorController {
         }
 
         panel = p
+    }
+
+    /// **所属 Space から外れた窓は、作り直すしかない。**
+    ///
+    /// 全画面のアプリを出入りしたり再読み込みしたりしていると、`canJoinAllSpaces` の窓が
+    /// 一部の Space（実測では通常のデスクトップ1つと、新しくできた全画面の Space 1つ）
+    /// にしか属さなくなることがある。そうなると他の Space では二度と出ない。
+    /// `orderOut` → `collectionBehavior` の再設定（v1.4.5）では戻らず、
+    /// `.moveToActiveSpace` を経由する手は待ち時間しだいで戻ったり戻らなかったりした。
+    /// 新しく作った窓は、その場で全 Space に属する（窓の所属を削って再現し、確かめた）。
+    private func rebuildPanel(reason: String) {
+        let before = panel.flatMap { Self.serverState(of: $0) }
+        teardownPanel()
+        build()
+        guard let panel else { return }
+        reposition()
+        panel.alphaValue = 1
+        panel.orderFrontRegardless()
+        Log.write("indicator: Space から外れていたので目印を作り直した（\(reason)） onscreen=\(before?.onscreen ?? false)→\(Self.serverState(of: panel)?.onscreen ?? false)")
+    }
+
+    private func teardownPanel() {
+        if let moveObserver { NotificationCenter.default.removeObserver(moveObserver) }
+        if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
+        if let spaceObserver { NSWorkspace.shared.notificationCenter.removeObserver(spaceObserver) }
+        moveObserver = nil
+        screenObserver = nil
+        spaceObserver = nil
+        panel?.orderOut(nil)
+        panel?.contentView = nil
+        panel = nil
     }
 
     private func showMenu() {
@@ -372,8 +411,18 @@ final class IndicatorController {
         if IndicatorPlacement.serverMatches(appKit: panel.frame, server: server,
                                             primaryHeight: primary.frame.height) {
             lastMismatchOrigin = nil
+            pendingMismatchOrigin = nil
             return
         }
+        // **Space の切り替え中は、窓が横へ滑っていくのでずれて見える。**
+        // そこで置き直すとアニメーションに割り込む（v1.4.6 で実際に起きた）。
+        // 切り替えから 1 秒以内は見送り、同じずれが 2 回続いたときだけ直す。
+        guard Date().timeIntervalSince(lastSpaceChangeAt) > 1,
+              pendingMismatchOrigin == server.origin else {
+            pendingMismatchOrigin = server.origin
+            return
+        }
+        pendingMismatchOrigin = nil
         panel.setFrameOrigin(NSPoint(x: origin.x + 1, y: origin.y))
         panel.setFrameOrigin(origin)
         // 直らないまま 0.4 秒ごとに同じ行を積まない
@@ -409,25 +458,20 @@ final class IndicatorController {
     }
 
     /// Space の切り替え後に、目印が画面に出ているかを確かめて戻す。
-    /// 位置の食い違いは `reposition` が直す。それでも出ていなければ、
-    /// いったん外して全 Space への参加を登録し直す。activate はせず入力先を保つ。
+    /// 位置の食い違いは `reposition` が直す。それでも出ていなければ窓を作り直す。
+    /// activate はせず入力先を保つ。
     private func restoreAcrossSpaces() {
         guard wantsVisible, let panel else { return }
         // ドラッグの途中でウィンドウを外さない。
         guard NSEvent.pressedMouseButtons == 0 else { return }
         reposition()
         panel.alphaValue = 1
-        if panel.isVisible, Self.serverState(of: panel)?.onscreen != false {
-            panel.orderFrontRegardless()
-            return
-        }
-        let wasVisible = panel.isVisible
-        panel.orderOut(nil)
-        panel.collectionBehavior = []
-        panel.collectionBehavior = Self.collectionBehavior
+        // 外されていただけなら、前へ出せば戻る
         panel.orderFrontRegardless()
-        let state = Self.serverState(of: panel)
-        Log.write("indicator: Space へ再登録 visible=\(wasVisible)→\(panel.isVisible) onscreen=\(state?.onscreen ?? false) frame=\(panel.frame) 実際(左上原点)=\(state?.frame.origin ?? .zero)")
+        if Self.serverState(of: panel)?.onscreen != false { return }
+        // 切り替えのアニメーション中は一瞬だけ出ていないことがある。落ち着いてから判断する
+        guard Date().timeIntervalSince(lastSpaceChangeAt) > 0.4 else { return }
+        rebuildPanel(reason: "Space の切り替え後")
     }
 
     /// 覚えた位置は「画面の左下からの距離」なので、どの画面でも同じ場所に出る
