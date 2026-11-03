@@ -255,16 +255,21 @@ final class IndicatorController {
         p.collectionBehavior = Self.collectionBehavior
         p.animationBehavior = .none
 
-        // 背景をつかんで動かせるようにする。ボタンの上以外はどこでも掴める
+        // 背景をつかんで動かすのは自前でやる（`dragMoved` / `dragEnded`）。
+        // `isMovableByWindowBackground` に任せていたら、いつのまにか掴めなくなった。
+        // 中身が SwiftUI（NSHostingView）だと、背景の押下が窓まで届くかは SwiftUI 次第になる。
+        // 両方生かすと二重に動くので、窓側の仕組みは切っておく。
         p.isMovable = true
-        p.isMovableByWindowBackground = true
+        p.isMovableByWindowBackground = false
 
         let view = IndicatorView(
             model: model,
             onPause: { [weak self] in self?.onPause?() },
             onResume: { [weak self] in self?.onResume?() },
             onClose: { [weak self] in self?.onClose?() },
-            onMenu: { [weak self] in self?.showMenu() })
+            onMenu: { [weak self] in self?.showMenu() },
+            onDrag: { [weak self] translation in self?.dragMoved(translation: translation) },
+            onDragEnd: { [weak self] in self?.dragEnded() })
 
         let host = NSHostingView(rootView: view)
         host.frame = NSRect(origin: .zero, size: IndicatorController.size)
@@ -335,6 +340,37 @@ final class IndicatorController {
         guard let menu = menuProvider?(), let contentView = panel?.contentView else { return }
         let point = NSPoint(x: IndicatorController.size.width - 26, y: 4)
         menu.popUp(positioning: nil, at: point, in: contentView)
+    }
+
+    // MARK: - ドラッグ
+
+    /// 掴んだ瞬間のマウス位置（画面座標）と窓の原点。
+    private var dragStart: (mouse: NSPoint, origin: NSPoint)?
+
+    /// **位置は SwiftUI の座標ではなく、画面上のマウス位置から決める。**
+    /// ジェスチャの移動量は窓の座標で測られるので、窓を動かすたびに基準もずれて震える。
+    private func dragMoved(translation: CGSize) {
+        guard let panel else { return }
+        let mouse = NSEvent.mouseLocation
+        if dragStart == nil {
+            // 動き出しの判定に使った数 pt ぶんを戻し、掴んだ点から動かす（窓の座標は y が下向き）
+            dragStart = (NSPoint(x: mouse.x - translation.width, y: mouse.y + translation.height),
+                         panel.frame.origin)
+        }
+        guard let start = dragStart else { return }
+        panel.setFrameOrigin(NSPoint(x: start.origin.x + mouse.x - start.mouse.x,
+                                     y: start.origin.y + mouse.y - start.mouse.y))
+    }
+
+    /// 離した場所を覚える。移動の通知を当てにせず、ここで確実に保存する。
+    private func dragEnded() {
+        dragStart = nil
+        guard let panel, let screen = panel.screen else { return }
+        Defaults.indicatorOffset = CGPoint(x: panel.frame.minX - screen.visibleFrame.minX,
+                                           y: panel.frame.minY - screen.visibleFrame.minY)
+        lastMismatchOrigin = nil
+        pendingMismatchOrigin = nil
+        Log.write("indicator: ドラッグで位置を変えた")
     }
 
     // MARK: - 位置
@@ -515,6 +551,8 @@ private struct IndicatorView: View {
     let onResume: () -> Void
     let onClose: () -> Void
     let onMenu: () -> Void
+    let onDrag: (CGSize) -> Void
+    let onDragEnd: () -> Void
 
     @State private var pulse = false
 
@@ -541,6 +579,11 @@ private struct IndicatorView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .background(.regularMaterial, in: Capsule())
         .overlay(Capsule().strokeBorder(Color.primary.opacity(0.10), lineWidth: 1))
+        // 隙間（Spacer）も含めて、ボタン以外ならどこでも掴める。ボタンのタップは子が先に取る
+        .contentShape(Capsule())
+        .gesture(DragGesture(minimumDistance: 3)
+            .onChanged { onDrag($0.translation) }
+            .onEnded { _ in onDragEnd() })
         .help(model.isRunning ? "録音中です。黙っていてもマイクを使っています。ドラッグで位置を調整できます" : "音声入力は一時停止中です。マイクは解放されています")
         .onAppear { pulse = true }
     }
